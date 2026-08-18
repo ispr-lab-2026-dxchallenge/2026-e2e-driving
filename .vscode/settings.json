@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "/opt/venv/bin/python",
+    "python.analysis.extraPaths": ["/workspace/VAD"],
+    "python.terminal.activateEnvironment": false,
+    "jupyter.notebookFileRoot": "/workspace/VAD"
+}

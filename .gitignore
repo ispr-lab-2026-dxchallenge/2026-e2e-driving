@@ -1,0 +1,48 @@
+# ============================================================
+#  데이터 / 학습 산출물 - 절대 커밋하지 말 것
+# ============================================================
+# 체크포인트가 258MB 씩이라 한 번 커밋하면 저장소를 되돌리기 어렵다.
+data/
+work_dirs/
+ckpts/
+*.pth
+*.pkl
+*.tar
+*.tar.gz
+*.zip
+
+# 로그 / 결과물
+*.log
+*.log.json
+tf_logs/
+events.out.tfevents.*
+submission*.json
+nb_out/
+verify_pre/
+
+# ============================================================
+#  파이썬
+# ============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# ============================================================
+#  에디터 / OS
+# ============================================================
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# .vscode 는 커밋한다 (인터프리터 경로 공유가 필요)
+!.vscode/
+!.vscode/settings.json
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json

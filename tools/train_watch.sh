@@ -24,6 +24,9 @@ EPOCHS=${EPOCHS:-10}
 MAX_RETRY=${MAX_RETRY:-20}
 WD="work_dirs/$NAME"
 
+# work_dir 은 호스트에서 만든다. 컨테이너(root)가 만들면 소유자가 root 가 되어
+# 호스트 사용자가 watch.log 를 쓰지 못한다.
+mkdir -p "$HOME/ETRI_Challenge/$WD"
 docker exec etri mkdir -p "$WD"
 WLOG="$WD/watch.log"
 

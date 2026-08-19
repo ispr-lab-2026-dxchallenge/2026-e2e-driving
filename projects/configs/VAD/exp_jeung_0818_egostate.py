@@ -30,4 +30,8 @@ fp16 = dict(loss_scale=512.)
 data = dict(samples_per_gpu=4, workers_per_gpu=4)
 # iteration 단위 저장. epoch 단위(interval=1)로 두면 첫 저장까지 14시간이 걸려
 # 그 전에 죽으면 전부 날아간다 (08-18 밤에 실제로 겪음).
-checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=3)
+# IterSafeCheckpointHook 을 쓰는 이유는 custom_hooks.py 의 docstring 참조.
+# 요약: mmcv 기본 훅은 epoch 중간에 저장해도 메타에 'epoch+1' 을 적어서,
+#      재개하면 그 epoch 을 통째로 건너뛴다. 재개 1회당 epoch 을 하나 까먹는다.
+checkpoint_config = dict(
+    type='IterSafeCheckpointHook', by_epoch=False, interval=1000, max_keep_ckpts=3)

@@ -7,6 +7,11 @@
 #
 # 컨테이너 "밖"(호스트 셸 또는 WSL)에서 실행한다.
 #
+# [주의] mmcv EpochBasedRunner 는 epoch 중간 체크포인트에서 재개하면
+#        그 epoch 의 남은 부분을 건너뛰고 다음 epoch 으로 간다.
+#        가중치는 보존되지만 재개 1회당 epoch 이 하나 줄어든다.
+#        자세한 내용과 대응은 docs/WORKFLOW.md 5장 참조.
+#
 #   bash tools/train_watch.sh exp_baseline_fp16_b6
 #   bash tools/train_watch.sh exp_baseline_fp16_b6 "data.samples_per_gpu=5"
 #

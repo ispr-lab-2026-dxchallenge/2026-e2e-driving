@@ -247,6 +247,32 @@ checkpoint_config = dict(by_epoch=False, interval=1000, max_keep_ckpts=3)
 setsid nohup bash tools/train_watch.sh <config이름> "data.samples_per_gpu=5" > /dev/null 2>&1 < /dev/null &
 ```
 
+### 재개하면 그 epoch 의 남은 부분을 건너뛴다 (알고 쓸 것)
+
+mmcv 1.4.0 의 `EpochBasedRunner` 는 체크포인트를 저장할 때 메타에
+`epoch = 현재epoch + 1` 을 적는다. **epoch 중간에 저장해도 "이 epoch 은 끝났다"고
+기록되므로**, 거기서 재개하면 남은 부분을 건너뛰고 다음 epoch 으로 간다.
+
+2026-08-19 실측:
+
+```
+resumed epoch 1, iter 999
+Epoch [2][100/20220]        <- epoch 1 이 6% 진행된 상태였는데 2 로 넘어감
+lr: 2.000e-04 -> 1.951e-04  <- 코사인 스케줄도 한 칸 진행됨
+```
+
+가중치와 옵티마이저 상태는 보존되므로 학습이 망가지진 않는다. 다만:
+
+- **재개할 때마다 epoch 을 하나씩 까먹는다**
+- **학습률 스케줄이 그만큼 앞당겨진다**
+
+그래서 이렇게 운영한다.
+
+- 체크포인트는 그대로 iteration 단위로 자주 남긴다. **크래시 시 전멸을 막는 안전망**이다
+- 학습 초반(첫 epoch 안)에 죽었으면 **차라리 처음부터 다시 돌린다.** 잃는 게 적다
+- 후반에 죽어서 재개했다면 `runner.max_epochs` 를 재개 횟수만큼 올려 보상한다
+- **기준점이 되는 베이스라인은 재개 이력이 없는 실행으로 확보한다**
+
 ### VRAM 은 90% 를 넘기지 말 것
 
 2026-08-18 크래시 당시 VRAM 이 15,874 / 16,311 MiB (97.3%) 였다. 여유가 437MB 뿐이었고,

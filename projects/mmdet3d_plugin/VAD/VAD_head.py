@@ -144,6 +144,7 @@ class VADHead(DETRHead):
                  query_thresh=None,
                  query_use_fix_pad=None,
                  ego_lcf_feat_idx=None,
+                 plan_reg_time_weight=None,
                  valid_fut_ts=6,
                  **kwargs):
 
@@ -168,6 +169,7 @@ class VADHead(DETRHead):
         self.query_thresh = query_thresh
         self.query_use_fix_pad = query_use_fix_pad
         self.ego_lcf_feat_idx = ego_lcf_feat_idx
+        self.plan_reg_time_weight = plan_reg_time_weight
         self.valid_fut_ts = valid_fut_ts
 
         if loss_traj_cls['use_sigmoid'] == True:
@@ -1138,6 +1140,20 @@ class VADHead(DETRHead):
         ego_fut_gt = ego_fut_gt.unsqueeze(1).repeat(1, self.ego_fut_mode, 1, 1)
         loss_plan_l1_weight = ego_fut_cmd[..., None, None] * ego_fut_masks[:, None, :, None]
         loss_plan_l1_weight = loss_plan_l1_weight.repeat(1, 1, 1, 2)
+
+        # 평가 지표는 waypoint 를 균등하게 보지 않는다.
+        # L2_avg = (1초 L2 + 2초 L2 + 3초 L2)/3 이고 각각이 앞 2/4/6개의 ADE 라서
+        # 누적 좌표 k 의 실효 가중치는 [11,11,5,5,2,2]/36 이 된다.
+        #
+        # 그런데 ego_fut_preds 는 누적 좌표가 아니라 "스텝 변위"다.
+        # 변위 d_i 의 오차는 i 이후 모든 누적 좌표에 전파되므로,
+        # 변위에 걸어야 할 가중치는 위 값의 suffix sum 인 [36,25,14,9,4,2] 이다.
+        #
+        # 기본값 None 이면 아무 일도 하지 않는다 (기존 동작과 동일).
+        if self.plan_reg_time_weight is not None:
+            tw = ego_fut_preds.new_tensor(self.plan_reg_time_weight)
+            tw = tw * (tw.numel() / tw.sum())        # 평균 1 로 정규화 -> loss_weight 재조정 불필요
+            loss_plan_l1_weight = loss_plan_l1_weight * tw[None, None, :, None]
 
         loss_plan_l1 = self.loss_plan_reg(
             ego_fut_preds,

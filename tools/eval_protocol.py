@@ -85,15 +85,21 @@ def run(model, dataset, groups, n_frames, eval_stride):
         # 과거 3초가 확보되는 지점부터 평가한다
         points = range(HIS_FRAMES, len(ids), eval_stride)
         for cur in points:
+            # 데이터 로딩은 타이머 밖에서 먼저 끝낸다.
+            # 운영국 정의는 "모든 model forward 의 누적 시간"이라
+            # JPEG 디코딩·정규화는 T_infer 에 포함되지 않는다.
+            batches = [collate([dataset[ids[cur + o]]], samples_per_gpu=1) for o in offs]
+
             reset_stream(model.module)
+            torch.cuda.synchronize()
             t0 = time.perf_counter()
-            result = collated = None
-            for o in offs:
-                collated = collate([dataset[ids[cur + o]]], samples_per_gpu=1)
+            result = None
+            for collated in batches:
                 with torch.no_grad():
                     result = model(return_loss=False, rescale=True, **collated)
             torch.cuda.synchronize()
             times.append((time.perf_counter() - t0) * 1000.0)   # ms
+            collated = batches[-1]
 
             if not bool(np.asarray(unwrap(collated, 'fut_valid_flag')).reshape(-1)[0]):
                 times.pop()

@@ -25,6 +25,10 @@ def parse_args():
     parser.add_argument('checkpoint')
     parser.add_argument('--ann-file', required=True)
     parser.add_argument('--out', required=True)
+    parser.add_argument('--offsets', default='-10,-5,0',
+                        help='사용할 프레임 오프셋 (5의 배수, 0.5초 간격). '
+                             '전체 val 실측 최적은 -10,-5,0 (eval_protocol.py 참조). '
+                             '빈 문자열이면 --frames 의 균등 분할을 쓴다')
     parser.add_argument('--frames', type=int, default=3,
                         help='clip 당 사용할 프레임 수 (1~7). 배포 기본값은 7 이지만 '
                              '실측상 3 이 L2 도 좋고 2.4배 빠르다. tools/eval_protocol.py 참조')
@@ -76,9 +80,21 @@ def main():
         clips.setdefault(info['scene_token'], []).append(gi)
 
     submission = {}
+    # 테스트 clip 의 7개 샘플은 오프셋 [-30,-25,...,0] 순서다.
+    # 오프셋 o 의 인덱스는 6 + o/5 (o 는 5의 배수, -30 <= o <= 0).
+    sel_idx = None
+    if args.offsets:
+        offs = [int(x) for x in args.offsets.split(',')]
+        assert all(o % 5 == 0 and -30 <= o <= 0 for o in offs),             '오프셋은 -30~0 사이 5의 배수여야 한다 (테스트 데이터가 0.5초 간격)'
+        assert offs[-1] == 0, '마지막은 반드시 현재 프레임(0)이어야 한다'
+        sel_idx = [6 + o // 5 for o in offs]
+
     n_used = None
     for clip_token, sample_ids in mmcv.track_iter_progress(list(clips.items())):
-        used = pick_frames(sample_ids, args.frames)
+        if sel_idx is not None:
+            used = [sample_ids[i] for i in sel_idx]
+        else:
+            used = pick_frames(sample_ids, args.frames)
         if n_used is None:
             n_used = len(used)
             print('clip 당 %d 프레임 중 %d 개 사용' % (len(sample_ids), n_used))

@@ -158,9 +158,26 @@ git clone <저장소 주소> ETRI_E2E_Driving_Challenge
 
 전처리 데이터를 `~/ETRI_Challenge/data/etri_pre/` 에 배치한다.
 
-**데이터는 반드시 리눅스 파일시스템 안(`~/`)에 둔다.**
-Windows 드라이브(`/mnt/c`, `/mnt/d`)에 두면 작은 파일 대량 접근이 극도로 느려
-학습이 데이터 로딩에 묶인다.
+**데이터는 반드시 리눅스 파일시스템 안(`~/`)의 SSD 에 둔다.** 두 가지 함정이 있다.
+
+1. **Windows 드라이브(`/mnt/c`, `/mnt/d`)에 두지 않는다.**
+   9P 프로토콜을 거쳐 작은 파일 대량 접근이 극도로 느려진다.
+
+2. **HDD 에 두지 않는다.** 전처리 데이터는 작은 JPEG 886,050 개다.
+   랜덤 읽기가 HDD 의 최악 시나리오다. 실측으로 WD Purple 8TB HDD 에 두고
+   `data_time` 이 치솟아 **10 epoch 예상 시간이 13일**이 나왔다.
+   같은 머신에서 NVMe 로 옮기니 **2일**로 끝났다.
+
+```bash
+lsblk -d -o NAME,ROTA,SIZE,MODEL      # ROTA=1 이면 HDD
+findmnt -T <데이터경로> -o SOURCE,FSTYPE,AVAIL
+```
+
+> `/home` 이 별도 파티션으로 HDD 에 잡혀 있는 구성이 흔하다.
+> `~/` 라고 해서 SSD 라는 보장이 없으니 `findmnt` 로 확인할 것.
+
+학습 시작 후 `data_time` 이 **0.2 초를 넘으면** 데이터 로딩이 병목이다.
+정상 범위는 0.1 초 안팎이다.
 
 ---
 

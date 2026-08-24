@@ -25,7 +25,19 @@ model = dict(
         ego_lcf_feat_idx=[0, 1, 4],
     ))
 
-# RTX 3060 12GB 기준. 16GB 머신에서 돌린다면 6 으로 올린다.
+# 배치는 실행할 때 --cfg-options 로 덮어쓴다. config 를 직접 고치지 말 것
+# (공유 파일이라 각자 고치면 충돌하고, 누가 몇으로 돌렸는지 추적이 안 된다).
+#
+#   bash tools/train_watch.sh <이름> "data.samples_per_gpu=5 data.workers_per_gpu=8"
+#
+# 비교 대상인 exp_baseline_fp16_b6 이 배치 5 로 돌고 있다. 배치가 다르면
+# 실효 학습률이 달라져서 "자차 상태 덕분인지 배치 덕분인지" 구분이 안 된다.
+# 16GB 에서 배치 6 은 VRAM 97% 를 써서 위험하다 (08-18 에 그 상태로 죽었다).
+# 12GB 는 4, 16GB 는 5.
+#
+# workers_per_gpu 는 결과에 영향이 없다. 데이터가 느린 디스크에 있으면 올릴 것.
+# 다만 워커 1개당 시스템 RAM 을 2GB 넘게 쓴다. 16GB 머신에서 3개 주고
+# 서버가 통째로 멈춘 적이 있다.
 fp16 = dict(loss_scale=512.)
 data = dict(samples_per_gpu=4, workers_per_gpu=4)
 # iteration 단위 저장. epoch 단위(interval=1)로 두면 첫 저장까지 14시간이 걸려

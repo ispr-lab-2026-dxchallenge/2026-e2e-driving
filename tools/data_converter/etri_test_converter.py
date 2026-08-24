@@ -20,6 +20,8 @@ HIS_FRAMES = 30
 STREAM_STRIDE = 5
 STREAM_FRAMES = list(range(-HIS_FRAMES, 1, STREAM_STRIDE))
 TRAJ_STEP = 5
+TARGET_FRAME = 50           # ego_pose.parquet 의 frame=50 행
+TARGET_SCALE = 100.0        # 학습 컨버터와 반드시 같아야 한다
 HIS_TS = 2
 FUT_TS = 6
 DT = 0.1
@@ -120,9 +122,20 @@ def ego_annotations(xyz, rpy, command):
     his = positions_in_frame(xyz, rpy, 0, his_ids)
     his_trajs = np.diff(his[:, :2], axis=0).astype(np.float32)
     velocity, accel, rotation_rate = local_motion(xyz, rpy, 0)
+
+    # 5초 뒤 목표점. clip 마다 frame=50 이 한 행 들어 있다.
+    if TARGET_FRAME not in xyz:
+        raise KeyError('ego_pose 에 frame=%d 가 없다. 목표점을 만들 수 없다.'
+                       % TARGET_FRAME)
+    target_point = positions_in_frame(xyz, rpy, 0, [TARGET_FRAME])[0, :2]
+
     ego_lcf_feat = np.array([
         velocity[0], velocity[1], accel[0], accel[1], rotation_rate[2],
-        EGO_LENGTH, EGO_WIDTH, np.linalg.norm(velocity[:2]), 0.0
+        EGO_LENGTH, EGO_WIDTH, np.linalg.norm(velocity[:2]), 0.0,
+        # 9, 10 : 목표점 원시값 (m)
+        target_point[0], target_point[1],
+        # 11, 12 : 정규화값
+        target_point[0] / TARGET_SCALE, target_point[1] / TARGET_SCALE,
     ], dtype=np.float32)
     return dict(
         gt_ego_his_trajs=his_trajs,
@@ -130,6 +143,7 @@ def ego_annotations(xyz, rpy, command):
         gt_ego_fut_masks=np.zeros(FUT_TS, dtype=np.float32),
         gt_ego_fut_cmd=command.astype(np.float32),
         gt_ego_lcf_feat=ego_lcf_feat,
+        gt_ego_target_valid=True,
     )
 
 

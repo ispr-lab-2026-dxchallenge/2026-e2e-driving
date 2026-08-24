@@ -45,7 +45,11 @@ def parse_args():
     p.add_argument('checkpoint')
     p.add_argument('--ann-file', default=None, help='기본값은 config 의 val split')
     p.add_argument('--frames', default='7,4,3,1',
-                   help='시험할 프레임 수 목록. 7 이 배포 기본값')
+                   help='시험할 프레임 수 목록. 과거 3초를 균등 분할한다. 7 이 배포 기본값')
+    p.add_argument('--offsets', default=None,
+                   help='오프셋을 직접 지정한다. 세미콜론으로 여러 조합. '
+                        '예: "-10,-5,0;-6,-3,0". 지정하면 --frames 는 무시된다. '
+                        '3초를 다 쓰지 않고 최근 프레임만 쓰는 조합을 시험할 때 쓴다')
     p.add_argument('--scenarios', type=int, default=10, help='0 이면 전부')
     p.add_argument('--eval-stride', type=int, default=20,
                    help='시나리오 안에서 몇 프레임마다 평가할지')
@@ -78,8 +82,8 @@ def official_l2(errs):
     return a1, a2, a3, (a1 + a2 + a3) / 3
 
 
-def run(model, dataset, groups, n_frames, eval_stride):
-    offs = frame_offsets(n_frames)
+def run(model, dataset, groups, offs, eval_stride):
+    label = len(offs)
     errs, times = [], []
     for si, (_tok, ids) in enumerate(groups):
         # 과거 3초가 확보되는 지점부터 평가한다
@@ -110,7 +114,7 @@ def run(model, dataset, groups, n_frames, eval_stride):
             gt = np.asarray(unwrap(collated, 'ego_fut_trajs')).reshape(-1, 2).cumsum(0)
             errs.append(np.linalg.norm(pred - gt, axis=1))
         print('    [%d프레임] 시나리오 %d/%d  평가점 %d'
-              % (n_frames, si + 1, len(groups), len(errs)), flush=True)
+              % (label, si + 1, len(groups), len(errs)), flush=True)
     return np.array(errs), np.array(times)
 
 
@@ -150,25 +154,31 @@ def main():
                   **collate([dataset[groups[0][1][k]]], samples_per_gpu=1))
     torch.cuda.synchronize()
 
+    if args.offsets:
+        combos = [[int(x) for x in grp.split(',')] for grp in args.offsets.split(';')]
+    else:
+        combos = [frame_offsets(int(x)) for x in args.frames.split(',')]
+
     rows = []
-    for n in [int(x) for x in args.frames.split(',')]:
-        print('--- %d 프레임  offsets=%s ---' % (n, frame_offsets(n)), flush=True)
-        errs, times = run(model, dataset, groups, n, args.eval_stride)
+    for offs in combos:
+        n = len(offs)
+        print('--- %d 프레임  offsets=%s ---' % (n, offs), flush=True)
+        errs, times = run(model, dataset, groups, offs, args.eval_stride)
         if len(errs) == 0:
             print('  유효 평가점 없음'); continue
         a1, a2, a3, avg = official_l2(errs)
-        rows.append((n, a1, a2, a3, avg, times.mean(), np.percentile(times, 95),
+        rows.append((offs, a1, a2, a3, avg, times.mean(), np.percentile(times, 95),
                      times.mean() / n))
 
     print()
     print('=' * 92)
-    print('%-6s %7s %7s %7s %9s | %10s %10s %10s'
-          % ('프레임', '1s', '2s', '3s', 'L2_avg', 'T_infer', 'p95', '프레임당'))
+    print('%-26s %7s %7s %7s %9s | %9s %9s'
+          % ('offsets', '1s', '2s', '3s', 'L2_avg', 'T_infer', '프레임당'))
     print('-' * 92)
-    for n, a1, a2, a3, avg, tm, p95, per in rows:
-        flag = '  <- 100ms 초과' if tm > 100 else ''
-        print('%-6d %7.3f %7.3f %7.3f %9.4f | %8.1fms %8.1fms %8.1fms%s'
-              % (n, a1, a2, a3, avg, tm, p95, per, flag))
+    for offs, a1, a2, a3, avg, tm, p95, per in rows:
+        flag = '  <-100ms초과' if tm > 100 else ''
+        print('%-26s %7.3f %7.3f %7.3f %9.4f | %7.1fms %7.1fms%s'
+              % (','.join(str(o) for o in offs), a1, a2, a3, avg, tm, per, flag))
     print('=' * 92)
     print()
     print('T_infer 는 초기화 이후 모든 forward 의 누적 시간이다 (2026-08-23 운영국 답변).')

@@ -22,6 +22,10 @@ MAIN_FRAMES = 300
 MIN_FRAME = -FRAME_OFFSET
 MAX_FRAME = FRAME_OFFSET + MAIN_FRAMES - 1
 TRAJ_STEP = 5
+TARGET_FRAME = 50           # 5초 뒤 = 50프레임 (10Hz)
+TARGET_SCALE = 100.0        # 목표점은 50~150m 라 그대로 넣으면
+                            # ego_fut_decoder(정규화 없는 Linear 스택)의
+                            # 다른 입력(약 N(0,1))보다 100배 크다
 FUT_TS = 6
 HIS_TS = 2
 
@@ -268,10 +272,19 @@ def ego_annotations(data, frame_id, ego_length, ego_width):
     can_bus[10:13] = rotation_rate
     can_bus[13:16] = velocity
 
+    # 5초 뒤 목표점을 현재 프레임 좌표계로 옮긴다 (x 전방, y 좌측)
+    tgt_pos, tgt_in_range = ego_positions_in_frame(
+        data, frame_id, np.array([frame_id + TARGET_FRAME]))
+    target_point = tgt_pos[0, :2]
+
     ego_lcf_feat = np.array([
         velocity[0], velocity[1], accel[0], accel[1], rotation_rate[2],
         ego_length, ego_width,
-        np.linalg.norm(velocity[:2]), 0.0
+        np.linalg.norm(velocity[:2]), 0.0,
+        # 9, 10 : 목표점 원시값 (m)
+        target_point[0], target_point[1],
+        # 11, 12 : 정규화값. 기본적으로 이쪽을 쓴다
+        target_point[0] / TARGET_SCALE, target_point[1] / TARGET_SCALE,
     ])
     return dict(
         gt_ego_his_trajs=his_trajs.astype(np.float32),
@@ -279,6 +292,7 @@ def ego_annotations(data, frame_id, ego_length, ego_width):
         gt_ego_fut_masks=fut_masks.astype(np.float32),
         gt_ego_fut_cmd=command.astype(np.float32),
         gt_ego_lcf_feat=ego_lcf_feat.astype(np.float32),
+        gt_ego_target_valid=bool(tgt_in_range[0]),
     ), can_bus, fut_valid_flag
 
 

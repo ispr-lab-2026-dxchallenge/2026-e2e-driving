@@ -65,7 +65,9 @@ def main():
     va = [i for i in infos if i["scene_token"] in val]
     lanes = meta.get("map_lanes", {})
 
-    base = os.path.join(args.data_root, "etri", "vad_etri_pre_infos_temporal")
+    # 출력 이름은 입력 pkl 에서 따온다. 예전에는 "vad_etri_pre_infos_temporal" 로
+    # 하드코딩돼 있어서, --pkl 로 다른 태그를 줘도 기존 split 파일을 덮어썼다.
+    base = src[:-len("_train.pkl")] if src.endswith("_train.pkl") else os.path.splitext(src)[0]
     mmcv.dump(dict(infos=tr, metadata=dict(
         version=meta.get("version", "etri-v1.0"),
         map_lanes={k: v for k, v in lanes.items() if k not in val})),

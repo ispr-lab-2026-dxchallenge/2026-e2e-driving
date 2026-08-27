@@ -53,7 +53,49 @@ def parse_args():
     p.add_argument('--scenarios', type=int, default=10, help='0 이면 전부')
     p.add_argument('--eval-stride', type=int, default=20,
                    help='시나리오 안에서 몇 프레임마다 평가할지')
+    p.add_argument('--history-bev-only', action='store_true',
+                   help='이력 프레임은 BEV 생성까지만 수행 (2026-08-25 운영국 허용). '
+                        '학습 코드의 only_bev=True 경로를 추론에 적용한다')
+    p.add_argument('--fp16', action='store_true',
+                   help='forward 를 fp16 autocast 로 실행 (2026-08-25 운영국 허용)')
     return p.parse_args()
+
+
+def history_bev_step(model, collated):
+    """이력 프레임 1개를 BEV 생성까지만 처리한다.
+
+    forward_test(VAD.py) 의 prev_bev 관리(장면 전환 감지, can_bus 델타 계산)를
+    그대로 재현하되, head 대신 pts_bbox_head(..., only_bev=True) 만 부른다.
+    학습의 obtain_history_bev 와 같은 경로다.
+    """
+    import copy as _copy
+    from mmcv.parallel import scatter
+    m = model.module
+    dev = torch.cuda.current_device()
+    data = scatter(collated, [dev])[0]
+    meta = data['img_metas'][0][0]
+    img = data['img'][0]
+
+    if meta['scene_token'] != m.prev_frame_info['scene_token']:
+        m.prev_frame_info['prev_bev'] = None
+    m.prev_frame_info['scene_token'] = meta['scene_token']
+
+    tmp_pos = _copy.deepcopy(meta['can_bus'][:3])
+    tmp_angle = _copy.deepcopy(meta['can_bus'][-1])
+    if m.prev_frame_info['prev_bev'] is not None:
+        meta['can_bus'][:3] -= m.prev_frame_info['prev_pos']
+        meta['can_bus'][-1] = (meta['can_bus'][-1] -
+                               m.prev_frame_info['prev_angle'] + 180) % 360 - 180
+    else:
+        meta['can_bus'][:3] = 0
+        meta['can_bus'][-1] = 0
+
+    img_feats = m.extract_feat(img=img, img_metas=[meta])
+    prev_bev = m.pts_bbox_head(img_feats, [meta],
+                               m.prev_frame_info['prev_bev'], only_bev=True)
+    m.prev_frame_info['prev_bev'] = prev_bev
+    m.prev_frame_info['prev_pos'] = tmp_pos
+    m.prev_frame_info['prev_angle'] = tmp_angle
 
 
 def frame_offsets(n):
@@ -82,8 +124,10 @@ def official_l2(errs):
     return a1, a2, a3, (a1 + a2 + a3) / 3
 
 
-def run(model, dataset, groups, offs, eval_stride):
+def run(model, dataset, groups, offs, eval_stride, hist_bev=False, fp16=False):
     label = len(offs)
+    import contextlib
+    amp = (lambda: torch.autocast('cuda', dtype=torch.float16)) if fp16         else contextlib.nullcontext
     errs, times = [], []
     for si, (_tok, ids) in enumerate(groups):
         # 과거 3초가 확보되는 지점부터 평가한다
@@ -98,9 +142,12 @@ def run(model, dataset, groups, offs, eval_stride):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             result = None
-            for collated in batches:
-                with torch.no_grad():
-                    result = model(return_loss=False, rescale=True, **collated)
+            for bi, collated in enumerate(batches):
+                with torch.no_grad(), amp():
+                    if hist_bev and bi < len(batches) - 1:
+                        history_bev_step(model, collated)
+                    else:
+                        result = model(return_loss=False, rescale=True, **collated)
             torch.cuda.synchronize()
             times.append((time.perf_counter() - t0) * 1000.0)   # ms
             collated = batches[-1]
@@ -163,7 +210,8 @@ def main():
     for offs in combos:
         n = len(offs)
         print('--- %d 프레임  offsets=%s ---' % (n, offs), flush=True)
-        errs, times = run(model, dataset, groups, offs, args.eval_stride)
+        errs, times = run(model, dataset, groups, offs, args.eval_stride,
+                          hist_bev=args.history_bev_only, fp16=args.fp16)
         if len(errs) == 0:
             print('  유효 평가점 없음'); continue
         a1, a2, a3, avg = official_l2(errs)

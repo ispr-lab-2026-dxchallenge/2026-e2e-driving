@@ -25,6 +25,14 @@ def parse_args():
     parser.add_argument('checkpoint')
     parser.add_argument('--ann-file', required=True)
     parser.add_argument('--out', required=True)
+    parser.add_argument('--history-bev-only', action='store_true', default=True,
+                        help='이력 프레임은 BEV 생성까지만 수행 (2026-08-25 운영국 허용). '
+                             'L2 동일, T_infer -21%% 실측. 기본 켜짐')
+    parser.add_argument('--full-forward', dest='history_bev_only', action='store_false',
+                        help='이력 프레임도 전체 forward (배포 원래 방식)')
+    parser.add_argument('--fp16', action='store_true', default=True,
+                        help='forward 를 fp16 autocast 로 (2026-08-25 운영국 허용). 기본 켜짐')
+    parser.add_argument('--fp32', dest='fp16', action='store_false')
     parser.add_argument('--offsets', default='-10,-5,0',
                         help='사용할 프레임 오프셋 (5의 배수, 0.5초 간격). '
                              '전체 val 실측 최적은 -10,-5,0 (eval_protocol.py 참조). '
@@ -33,6 +41,37 @@ def parse_args():
                         help='clip 당 사용할 프레임 수 (1~7). 배포 기본값은 7 이지만 '
                              '실측상 3 이 L2 도 좋고 2.4배 빠르다. tools/eval_protocol.py 참조')
     return parser.parse_args()
+
+
+def history_bev_step(model, collated):
+    """이력 프레임을 BEV 생성까지만 처리한다 (tools/eval_protocol.py 와 동일 구현)."""
+    import copy as _copy
+    from mmcv.parallel import scatter
+    m = model.module
+    data = scatter(collated, [torch.cuda.current_device()])[0]
+    meta = data['img_metas'][0][0]
+    img = data['img'][0]
+
+    if meta['scene_token'] != m.prev_frame_info['scene_token']:
+        m.prev_frame_info['prev_bev'] = None
+    m.prev_frame_info['scene_token'] = meta['scene_token']
+
+    tmp_pos = _copy.deepcopy(meta['can_bus'][:3])
+    tmp_angle = _copy.deepcopy(meta['can_bus'][-1])
+    if m.prev_frame_info['prev_bev'] is not None:
+        meta['can_bus'][:3] -= m.prev_frame_info['prev_pos']
+        meta['can_bus'][-1] = (meta['can_bus'][-1] -
+                               m.prev_frame_info['prev_angle'] + 180) % 360 - 180
+    else:
+        meta['can_bus'][:3] = 0
+        meta['can_bus'][-1] = 0
+
+    img_feats = m.extract_feat(img=img, img_metas=[meta])
+    prev_bev = m.pts_bbox_head(img_feats, [meta],
+                               m.prev_frame_info['prev_bev'], only_bev=True)
+    m.prev_frame_info['prev_bev'] = prev_bev
+    m.prev_frame_info['prev_pos'] = tmp_pos
+    m.prev_frame_info['prev_angle'] = tmp_angle
 
 
 def pick_frames(sample_ids, n):
@@ -101,10 +140,15 @@ def main():
         reset_stream(model.module)
         result = None
         collated = None
-        for gi in used:
+        import contextlib
+        amp = (lambda: torch.autocast('cuda', dtype=torch.float16)) if args.fp16             else contextlib.nullcontext
+        for fi, gi in enumerate(used):
             collated = collate([dataset[gi]], samples_per_gpu=1)
-            with torch.no_grad():
-                result = model(return_loss=False, rescale=True, **collated)
+            with torch.no_grad(), amp():
+                if args.history_bev_only and fi < len(used) - 1:
+                    history_bev_step(model, collated)
+                else:
+                    result = model(return_loss=False, rescale=True, **collated)
         ego_fut_preds = result[0]['pts_bbox']['ego_fut_preds']
         cmd = np.array(collated['ego_fut_cmd'][0].data[0]).reshape(
             -1, ego_fut_preds.shape[0])[0]

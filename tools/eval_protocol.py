@@ -56,6 +56,9 @@ def parse_args():
     p.add_argument('--history-bev-only', action='store_true',
                    help='이력 프레임은 BEV 생성까지만 수행 (2026-08-25 운영국 허용). '
                         '학습 코드의 only_bev=True 경로를 추론에 적용한다')
+    p.add_argument('--select-by-target', action='store_true',
+                   help='command 대신 목표점으로 후보 궤적을 선택한다 '
+                        '(2026-08-25 운영국: 선택 용도는 허용). 모델 입력은 불변')
     p.add_argument('--fp16', action='store_true',
                    help='forward 를 fp16 autocast 로 실행 (2026-08-25 운영국 허용)')
     return p.parse_args()
@@ -124,7 +127,8 @@ def official_l2(errs):
     return a1, a2, a3, (a1 + a2 + a3) / 3
 
 
-def run(model, dataset, groups, offs, eval_stride, hist_bev=False, fp16=False):
+def run(model, dataset, groups, offs, eval_stride, hist_bev=False, fp16=False,
+        sel_target=False):
     label = len(offs)
     import contextlib
     amp = (lambda: torch.autocast('cuda', dtype=torch.float16)) if fp16         else contextlib.nullcontext
@@ -156,8 +160,16 @@ def run(model, dataset, groups, offs, eval_stride, hist_bev=False, fp16=False):
                 times.pop()
                 continue
             pred = result[0]['pts_bbox']['ego_fut_preds']
-            cmd = np.asarray(unwrap(collated, 'ego_fut_cmd')).reshape(-1, pred.shape[0])[0]
-            pred = pred[int(cmd.argmax())].cpu().double().cumsum(0).numpy()
+            if sel_target:
+                # 후보 3개의 3초 끝점 중 목표점 경로의 3/5 지점에 가장 가까운 것을 고른다
+                lcf = np.asarray(unwrap(collated, 'ego_lcf_feat')).reshape(-1)
+                tgt35 = lcf[9:11] * (3.0 / 5.0)
+                cands = pred.cpu().double().cumsum(1).numpy()      # [3, 6, 2] 누적
+                mode = int(np.linalg.norm(cands[:, -1, :] - tgt35[None], axis=1).argmin())
+                pred = cands[mode]
+            else:
+                cmd = np.asarray(unwrap(collated, 'ego_fut_cmd')).reshape(-1, pred.shape[0])[0]
+                pred = pred[int(cmd.argmax())].cpu().double().cumsum(0).numpy()
             gt = np.asarray(unwrap(collated, 'ego_fut_trajs')).reshape(-1, 2).cumsum(0)
             errs.append(np.linalg.norm(pred - gt, axis=1))
         print('    [%d프레임] 시나리오 %d/%d  평가점 %d'
@@ -211,7 +223,8 @@ def main():
         n = len(offs)
         print('--- %d 프레임  offsets=%s ---' % (n, offs), flush=True)
         errs, times = run(model, dataset, groups, offs, args.eval_stride,
-                          hist_bev=args.history_bev_only, fp16=args.fp16)
+                          hist_bev=args.history_bev_only, fp16=args.fp16,
+                          sel_target=args.select_by_target)
         if len(errs) == 0:
             print('  유효 평가점 없음'); continue
         a1, a2, a3, avg = official_l2(errs)

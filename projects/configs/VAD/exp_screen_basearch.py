@@ -1,0 +1,124 @@
+"""스크리닝: base 구조 (BEV 200 + 인코더/디코더 6층 + queue 4) @ 전처리 0.4 입력.
+
+주최측이 제공한 VAD_etri_base.py 는 tiny 대비
+  BEV 100 -> 200 / 층수 3 -> 6 / queue 3 -> 4 / 입력 스케일 0.4 -> 0.8
+인데, 0.8 입력용 전처리 데이터(약 190GB)는 Colab 으로 배포가 불가능하다.
+
+그래서 이 실험은 **구조 스케일업만** 우리 0.4 전처리 데이터로 시험한다.
+(해상도는 별도 카드로 분리 - RESULTS.md 참조)
+
+VAD_etri_tiny_pre.py 의 어댑테이션(파이프라인에서 undistort/crop/scale 제거)을
+base 에 그대로 재현한 것이다. 카메라 파라미터는 pkl 에 보정돼 있다.
+
+비교 대상: exp_screen_base (1/3 데이터, 4 epoch)
+주의: A100 전용. 16GB GPU 에는 안 들어갈 가능성이 높다.
+"""
+_base_ = ['./VAD_etri_base.py']
+
+point_cloud_range = [-30.0, -15.0, -2.0, 30.0, 15.0, 2.0]
+class_names = ['Car', 'Pedestrian', 'Cyclist']
+map_classes = ['lane']
+map_fixed_ptsnum_per_gt_line = 20
+map_eval_use_same_gt_sample_num_flag = True
+bev_h_ = 200
+bev_w_ = 200
+queue_length = 4
+
+img_norm_cfg = dict(
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+
+input_modality = dict(
+    use_lidar=False, use_camera=True, use_radar=False,
+    use_map=False, use_external=True)
+
+dataset_type = 'VADCustomETRIDataset'
+data_root = 'data/etri/'
+
+PRE_W, PRE_H = 768, 432
+
+_collect_keys = [
+    'gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs', 'ego_fut_trajs',
+    'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'
+]
+
+train_pipeline = [
+    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='PhotoMetricDistortionMultiViewImage'),
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True,
+         with_attr_label=True),
+    dict(type='CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='CustomObjectNameFilter', classes=class_names),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='PadMultiViewImage', size_divisor=32),
+    dict(type='CustomDefaultFormatBundle3D', class_names=class_names,
+         with_ego=True),
+    dict(type='CustomCollect3D', keys=_collect_keys),
+]
+
+test_pipeline = [
+    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True,
+         with_attr_label=True),
+    dict(type='CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='CustomObjectNameFilter', classes=class_names),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(
+        type='MultiScaleFlipAug3D',
+        img_scale=(PRE_W, PRE_H),
+        pts_scale_ratio=1,
+        flip=False,
+        transforms=[
+            dict(type='PadMultiViewImage', size_divisor=32),
+            dict(type='CustomDefaultFormatBundle3D', class_names=class_names,
+                 with_label=False, with_ego=True),
+            dict(type='CustomCollect3D',
+                 keys=_collect_keys + ['fut_valid_flag']),
+        ]),
+]
+
+_common = dict(
+    type=dataset_type,
+    data_root=data_root,
+    classes=class_names,
+    modality=input_modality,
+    bev_size=(bev_h_, bev_w_),
+    pc_range=point_cloud_range,
+    map_classes=map_classes,
+    map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
+    map_eval_use_same_gt_sample_num_flag=map_eval_use_same_gt_sample_num_flag,
+    crop_size=(PRE_W, PRE_H),
+    custom_eval_version='vad_nusc_detection_cvpr_2019',
+)
+
+data = dict(
+    samples_per_gpu=8,
+    workers_per_gpu=12,
+    train=dict(
+        ann_file=data_root + 'vad_etri_pre_infos_temporal_screen.pkl',
+        pipeline=train_pipeline,
+        test_mode=False,
+        use_valid_flag=True,
+        queue_length=queue_length,
+        box_type_3d='LiDAR',
+        **_common),
+    val=dict(
+        ann_file=data_root + 'vad_etri_pre_infos_temporal_valsplit.pkl',
+        pipeline=test_pipeline,
+        samples_per_gpu=1,
+        use_pkl_result=True,
+        **_common),
+    test=dict(
+        ann_file=data_root + 'vad_etri_pre_infos_temporal_valsplit.pkl',
+        pipeline=test_pipeline,
+        samples_per_gpu=1,
+        use_pkl_result=True,
+        **_common),
+    shuffler_sampler=dict(type='DistributedGroupSampler'),
+    nonshuffler_sampler=dict(type='DistributedSampler'),
+)
+
+total_epochs = 4
+runner = dict(type='EpochBasedRunner', max_epochs=4)
+fp16 = dict(loss_scale=512.)
+checkpoint_config = dict(
+    type='IterSafeCheckpointHook', by_epoch=False, interval=1000, max_keep_ckpts=3)

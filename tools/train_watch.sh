@@ -18,6 +18,9 @@
 # 백그라운드로 돌리려면:
 #   setsid nohup bash tools/train_watch.sh <이름> > /dev/null 2>&1 < /dev/null &
 set -u
+# 컨테이너 이름이 다른 머신(예: 4080 은 etri2)은 이렇게 실행한다:
+#   ETRI_CONTAINER=etri2 bash tools/train_watch.sh <config> "..."
+CTR=${ETRI_CONTAINER:-etri}
 NAME=${1:?"config 이름을 넣어라 (확장자 없이)"}
 EXTRA=${2:-}
 EPOCHS=${EPOCHS:-10}
@@ -27,7 +30,7 @@ WD="work_dirs/$NAME"
 # work_dir 은 호스트에서 만든다. 컨테이너(root)가 만들면 소유자가 root 가 되어
 # 호스트 사용자가 watch.log 를 쓰지 못한다.
 mkdir -p "$HOME/ETRI_Challenge/$WD"
-docker exec etri mkdir -p "$WD"
+docker exec "$CTR" mkdir -p "$WD"
 WLOG="$WD/watch.log"
 
 log() { echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$HOME/ETRI_Challenge/$WLOG"; }
@@ -35,10 +38,10 @@ log() { echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$HOME/ETRI_Challenge/$WL
 log "감시 시작  config=$NAME  epochs=$EPOCHS  extra='$EXTRA'"
 
 for i in $(seq 1 "$MAX_RETRY"); do
-  ITER=$(docker exec etri sh -c "grep -o 'Epoch \[[0-9]*\]\[[0-9]*/' $WD/train.log 2>/dev/null | tail -1" || true)
+  ITER=$(docker exec "$CTR" sh -c "grep -o 'Epoch \[[0-9]*\]\[[0-9]*/' $WD/train.log 2>/dev/null | tail -1" || true)
   log "시도 $i/$MAX_RETRY  (마지막 진행: ${ITER:-없음})"
 
-  docker exec etri bash -c "python tools/train.py \
+  docker exec "$CTR" bash -c "python tools/train.py \
       projects/configs/VAD/$NAME.py \
       --work-dir $WD --no-validate \
       --resume-from $WD/latest.pth \
@@ -52,9 +55,9 @@ for i in $(seq 1 "$MAX_RETRY"); do
   fi
 
   # 체크포인트가 없으면 재시작해도 처음부터라 무한 반복이 된다. 확인 후 중단.
-  if ! docker exec etri test -f "$WD/latest.pth"; then
+  if ! docker exec "$CTR" test -f "$WD/latest.pth"; then
     log "rc=$rc 로 죽었는데 latest.pth 가 없다. 첫 체크포인트 전에 실패한 것이므로 중단한다."
-    docker exec etri tail -20 "$WD/train.log"
+    docker exec "$CTR" tail -20 "$WD/train.log"
     exit 1
   fi
 

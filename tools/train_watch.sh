@@ -55,22 +55,25 @@ for i in $(seq 1 "$MAX_RETRY"); do
 
   if [ "$rc" -eq 0 ]; then
     log "정상 종료 (학습 완료)"
-    # ── 자동 평가: 전체 val 39 시나리오, 제출과 동일한 추론 설정 ──
+    # 자동 평가: 전체 val 39 시나리오, 제출과 동일한 추론 설정
     log "자동 평가 시작 (약 25~60분)"
-    docker exec "$CTR" bash -c "python tools/eval_protocol.py 
-        projects/configs/VAD/$NAME.py $WD/latest.pth 
-        --scenarios 0 --eval-stride 10 --offsets=-10,-5,0 
-        --history-bev-only --fp16 > $WD/eval.log 2>&1" 
-      && log "평가 결과: $(docker exec "$CTR" sh -c "grep -E '^-10' $WD/eval.log | head -1")" 
-      || log "!! 자동 평가 실패 - $WD/eval.log 확인"
-    # ── ABLATION=1 로 실행했을 때만: 영상 기여도 검사 (보조 입력 모델용) ──
+    EVCMD="python tools/eval_protocol.py projects/configs/VAD/$NAME.py $WD/latest.pth --scenarios 0 --eval-stride 10 --offsets=-10,-5,0 --history-bev-only --fp16"
+    if docker exec "$CTR" sh -c "$EVCMD > $WD/eval.log 2>&1"; then
+      RES=$(docker exec "$CTR" sh -c "grep -E '^-10' $WD/eval.log" | head -1)
+      log "평가 결과: $RES"
+    else
+      log "!! 자동 평가 실패 - $WD/eval.log 확인"
+    fi
+    # ABLATION=1 일 때만: 영상 기여도 검사 (보조 입력 모델용)
     if [ "${ABLATION:-0}" = "1" ]; then
       log "영상 ablation 시작 (약 30분)"
-      docker exec "$CTR" bash -c "python tools/ablate_image.py 
-          projects/configs/VAD/$NAME.py $WD/latest.pth 
-          --scenarios 10 > $WD/ablation.log 2>&1" 
-        && log "ablation: $(docker exec "$CTR" sh -c "grep -E '배로 악화' $WD/ablation.log | head -1")" 
-        || log "!! ablation 실패 - $WD/ablation.log 확인"
+      ABCMD="python tools/ablate_image.py projects/configs/VAD/$NAME.py $WD/latest.pth --scenarios 10"
+      if docker exec "$CTR" sh -c "$ABCMD > $WD/ablation.log 2>&1"; then
+        ABRES=$(docker exec "$CTR" sh -c "grep -E '배로 악화' $WD/ablation.log" | head -1)
+        log "ablation: $ABRES"
+      else
+        log "!! ablation 실패 - $WD/ablation.log 확인"
+      fi
     fi
     exit 0
   fi

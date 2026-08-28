@@ -534,6 +534,11 @@ class VADHead(DETRHead):
                 prev_bev=prev_bev,
             )
         else:
+            # 트랙 T: 목표점을 BEV 형성 단계의 조건으로 전달 (planner 입력 아님)
+            _tp = None
+            if getattr(self.transformer, 'use_target_cond', False) and ego_lcf_feat is not None and ego_lcf_feat.shape[-1] >= 13:
+                _tp = ego_lcf_feat.reshape(ego_lcf_feat.shape[0], -1)[:, 11:13]
+                _tp = _tp.detach().cpu().numpy()
             outputs = self.transformer(
                 mlvl_feats,
                 bev_queries,
@@ -549,6 +554,7 @@ class VADHead(DETRHead):
                 map_reg_branches=self.map_reg_branches if self.with_box_refine else None,  # noqa:E501
                 map_cls_branches=self.map_cls_branches if self.as_two_stage else None,
                 img_metas=img_metas,
+                target_point=_tp,
                 prev_bev=prev_bev
         )
 

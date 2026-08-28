@@ -140,6 +140,8 @@ class VADPerceptionTransformer(BaseModule):
                  rotate_prev_bev=True,
                  use_shift=True,
                  use_can_bus=True,
+                 use_target_cond=False,
+                 target_cond_drop=0.5,
                  can_bus_norm=True,
                  use_cams_embeds=True,
                  rotate_center=[100, 100],
@@ -164,6 +166,10 @@ class VADPerceptionTransformer(BaseModule):
         self.rotate_prev_bev = rotate_prev_bev
         self.use_shift = use_shift
         self.use_can_bus = use_can_bus
+        # 목표점 -> BEV 조건 입력 (2026-08-28 운영국 허용: BEV/scene feature
+        # 형성 단계의 조건 입력). planner 직접 입력이 아니다.
+        self.use_target_cond = use_target_cond
+        self.target_cond_drop = target_cond_drop
         self.can_bus_norm = can_bus_norm
         self.use_cams_embeds = use_cams_embeds
         self.two_stage_num_proposals = two_stage_num_proposals
@@ -188,6 +194,14 @@ class VADPerceptionTransformer(BaseModule):
         )
         if self.can_bus_norm:
             self.can_bus_mlp.add_module('norm', nn.LayerNorm(self.embed_dims))
+        if self.use_target_cond:
+            self.target_mlp = nn.Sequential(
+                nn.Linear(2, self.embed_dims // 2),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.embed_dims // 2, self.embed_dims),
+                nn.ReLU(inplace=True),
+                nn.LayerNorm(self.embed_dims),
+            )
 
     def init_weights(self):
         """Initialize the transformer weights."""
@@ -206,6 +220,8 @@ class VADPerceptionTransformer(BaseModule):
         xavier_init(self.reference_points, distribution='uniform', bias=0.)
         xavier_init(self.map_reference_points, distribution='uniform', bias=0.)
         xavier_init(self.can_bus_mlp, distribution='uniform', bias=0.)
+        if self.use_target_cond:
+            xavier_init(self.target_mlp, distribution='uniform', bias=0.)
 
     # TODO apply fp16 to this module cause grad_norm NAN
     # @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'prev_bev', 'bev_pos'))
@@ -268,6 +284,16 @@ class VADPerceptionTransformer(BaseModule):
             [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
         can_bus = self.can_bus_mlp(can_bus)[None, :, :]
         bev_queries = bev_queries + can_bus * self.use_can_bus
+        if self.use_target_cond:
+            tp = kwargs.get('target_point', None)
+            if tp is not None:
+                tp = bev_queries.new_tensor(tp).reshape(bs, 2)
+                t_emb = self.target_mlp(tp)[None, :, :]
+                # condition dropout: 학습 중 확률적으로 목표점을 지워
+                # 목표점만으로 수렴하는 지름길 학습을 차단한다
+                if self.training and float(torch.rand(1)) < self.target_cond_drop:
+                    t_emb = t_emb * 0.0
+                bev_queries = bev_queries + t_emb
 
         feat_flatten = []
         spatial_shapes = []

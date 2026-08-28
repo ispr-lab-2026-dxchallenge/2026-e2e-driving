@@ -144,6 +144,10 @@ class VADHead(DETRHead):
                  query_thresh=None,
                  query_use_fix_pad=None,
                  ego_lcf_feat_idx=None,
+                 use_anchor_head=False,
+                 anchor_file=None,
+                 anchor_cls_weight=0.5,
+                 anchor_reg_weight=1.0,
                  plan_reg_time_weight=None,
                  valid_fut_ts=6,
                  **kwargs):
@@ -169,6 +173,11 @@ class VADHead(DETRHead):
         self.query_thresh = query_thresh
         self.query_use_fix_pad = query_use_fix_pad
         self.ego_lcf_feat_idx = ego_lcf_feat_idx
+        # 트랙 V (2026-08-28 운영국 허용: 학습 데이터 고정 앵커 + 비전 선택/보정)
+        self.use_anchor_head = use_anchor_head
+        self.anchor_file = anchor_file
+        self.anchor_cls_weight = anchor_cls_weight
+        self.anchor_reg_weight = anchor_reg_weight
         self.plan_reg_time_weight = plan_reg_time_weight
         self.valid_fut_ts = valid_fut_ts
 
@@ -424,6 +433,28 @@ class VADHead(DETRHead):
             ego_fut_decoder.append(nn.ReLU())
         ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, self.ego_fut_mode*self.fut_ts*2))
         self.ego_fut_decoder = nn.Sequential(*ego_fut_decoder)
+        if self.use_anchor_head:
+            # 앵커는 tools/make_anchors.py 가 학습 split 궤적만으로 생성 (md5 확인)
+            anc = np.load(self.anchor_file).astype(np.float32)  # (K,6,2) 누적 좌표
+            self.num_plan_anchors = anc.shape[0]
+            self.register_buffer('plan_anchors', torch.from_numpy(anc))
+            steps = np.diff(anc, axis=1,
+                            prepend=np.zeros((anc.shape[0], 1, 2), dtype=np.float32))
+            self.register_buffer('plan_anchor_steps', torch.from_numpy(steps))
+            self.anchor_cls_branch = nn.Sequential(
+                Linear(ego_fut_dec_in_dim, self.embed_dims),
+                nn.ReLU(inplace=True),
+                Linear(self.embed_dims, self.ego_fut_mode * self.num_plan_anchors))
+            self.anchor_emb = nn.Sequential(
+                Linear(self.fut_ts * 2, self.embed_dims),
+                nn.ReLU(inplace=True),
+                Linear(self.embed_dims, self.embed_dims))
+            self.anchor_refine_branch = nn.Sequential(
+                Linear(ego_fut_dec_in_dim + self.embed_dims, self.embed_dims),
+                nn.ReLU(inplace=True),
+                Linear(self.embed_dims, self.embed_dims),
+                nn.ReLU(inplace=True),
+                Linear(self.embed_dims, self.fut_ts * 2))
 
         self.agent_fus_mlp = nn.Sequential(
             nn.Linear(self.fut_mode*2*self.embed_dims, self.embed_dims, bias=True),
@@ -818,6 +849,23 @@ class VADHead(DETRHead):
             'ego_fut_preds': outputs_ego_trajs,
         }
 
+        if self.use_anchor_head:
+            # 트랙 V: 비전(scene) 특징만으로 앵커를 고르고 잔차를 보정한다
+            a_cls = self.anchor_cls_branch(ego_feats).reshape(
+                -1, self.ego_fut_mode, self.num_plan_anchors)  # (B,mode,K)
+            outs['anchor_cls_scores'] = a_cls
+            outs['ego_plan_feats'] = ego_feats
+            if not self.training:
+                top = a_cls.argmax(-1)                    # (B,mode)
+                sel = self.plan_anchors[top]              # (B,mode,6,2)
+                emb = self.anchor_emb(sel.flatten(-2))
+                feat = ego_feats.reshape(ego_feats.shape[0], 1, -1).expand(
+                    -1, self.ego_fut_mode, -1)
+                ref = self.anchor_refine_branch(torch.cat([feat, emb], dim=-1))
+                # 기존 출력 자리에 스텝 변위 형식 그대로 넣어 하위 파이프라인 무수정
+                outs['ego_fut_preds'] = self.plan_anchor_steps[top] + ref.reshape(
+                    -1, self.ego_fut_mode, self.fut_ts, 2)
+
         return outs
 
     def map_transform_box(self, pts, y_first=False):
@@ -1204,6 +1252,40 @@ class VADHead(DETRHead):
 
         return loss_plan_dict
     
+    def loss_anchor(self, cls_scores, ego_feats, ego_fut_gt,
+                    ego_fut_masks, ego_fut_cmd):
+        """트랙 V 손실: 최근접 앵커 분류(CE) + 할당 앵커 기준 잔차 회귀(L1).
+        cls_scores (B,mode,K), ego_feats (B,1,in_dim),
+        ego_fut_gt (B,fut_ts,2) 스텝 변위, masks (B,fut_ts), cmd (B,mode).
+        """
+        # loss() 의 force_fp32 가 입력을 fp32 로 만들므로 브랜치 dtype 에 맞춘다
+        dt = self.anchor_cls_branch[0].weight.dtype
+        anchors = self.plan_anchors.float()
+        with torch.no_grad():
+            # 대회 지표(L2_avg)와 같은 척도로 최근접 앵커 할당
+            gt_cum = torch.cumsum(ego_fut_gt.float(), dim=1)
+            d = torch.linalg.norm(gt_cum[:, None] - anchors[None], dim=-1)  # (B,K,T)
+            l2 = (d[..., :2].mean(-1) + d[..., :4].mean(-1) + d.mean(-1)) / 3.0
+            assign = l2.argmin(-1)  # (B,)
+        bidx = torch.arange(cls_scores.shape[0], device=cls_scores.device)
+        logits = cls_scores[bidx, ego_fut_cmd.argmax(-1)]  # (B,K)
+        valid = ego_fut_masks.min(-1).values > 0  # 미래가 완전한 샘플만 분류 학습
+        if valid.any():
+            loss_cls = F.cross_entropy(logits[valid].float(), assign[valid])
+        else:
+            loss_cls = cls_scores.sum() * 0.0
+        emb = self.anchor_emb(anchors[assign].flatten(-2).to(dt))
+        ref = self.anchor_refine_branch(
+            torch.cat([ego_feats.reshape(ego_feats.shape[0], -1).to(dt), emb], dim=-1))
+        pred_steps = self.plan_anchor_steps.float()[assign] + ref.float().reshape(
+            -1, self.fut_ts, 2)
+        w = ego_fut_masks[..., None].float()
+        loss_reg = (torch.abs(pred_steps - ego_fut_gt.float()) * w).sum() / (
+            w.sum() * 2).clamp(min=1)
+        loss_cls = torch.nan_to_num(loss_cls * self.anchor_cls_weight)
+        loss_reg = torch.nan_to_num(loss_reg * self.anchor_reg_weight)
+        return loss_cls, loss_reg
+
     def loss_single(self,
                     cls_scores,
                     bbox_preds,
@@ -1658,6 +1740,12 @@ class VADHead(DETRHead):
         loss_dict['loss_plan_bound'] = loss_planning_dict['loss_plan_bound']
         loss_dict['loss_plan_col'] = loss_planning_dict['loss_plan_col']
         loss_dict['loss_plan_dir'] = loss_planning_dict['loss_plan_dir']
+        if self.use_anchor_head:
+            loss_anchor_cls, loss_anchor_reg = self.loss_anchor(
+                preds_dicts['anchor_cls_scores'], preds_dicts['ego_plan_feats'],
+                ego_fut_gt, ego_fut_masks, ego_fut_cmd)
+            loss_dict['loss_anchor_cls'] = loss_anchor_cls
+            loss_dict['loss_anchor_reg'] = loss_anchor_reg
 
         # loss from other decoder layers
         num_dec_layer = 0

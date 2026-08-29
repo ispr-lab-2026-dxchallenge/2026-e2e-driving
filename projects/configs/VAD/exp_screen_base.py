@@ -10,8 +10,11 @@ data = dict(
     samples_per_gpu=5, workers_per_gpu=8,
     train=dict(ann_file=data_root + 'vad_etri_pre_infos_temporal_screen.pkl'))
 
-total_epochs = 4
-runner = dict(type='EpochBasedRunner', max_epochs=4)
+# 스크리닝 표준은 10 epoch (docs/RESULTS.md #10 참고).
+# train_watch 는 EPOCHS 미지정 시 config 값을 쓰므로 여기 값이 곧 표준이다.
+# (8/28 base2 가 4ep 로 돌아간 사고의 재발 방지 - 의도적 단축은 EPOCHS=4 로)
+total_epochs = 10
+runner = dict(type='EpochBasedRunner', max_epochs=10)
 fp16 = dict(loss_scale=512.)
 checkpoint_config = dict(
     type='IterSafeCheckpointHook', by_epoch=False, interval=1000, max_keep_ckpts=3)

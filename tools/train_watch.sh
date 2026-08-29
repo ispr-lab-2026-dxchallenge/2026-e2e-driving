@@ -56,14 +56,20 @@ for i in $(seq 1 "$MAX_RETRY"); do
   if [ "$rc" -eq 0 ]; then
     log "정상 종료 (학습 완료)"
     # 자동 평가: 전체 val 39 시나리오, 제출과 동일한 추론 설정
-    log "자동 평가 시작 (약 25~60분)"
-    EVCMD="python tools/eval_protocol.py projects/configs/VAD/$NAME.py $WD/latest.pth --scenarios 0 --eval-stride 10 --offsets=-10,-5,0 --history-bev-only --fp16"
-    if docker exec "$CTR" sh -c "$EVCMD > $WD/eval.log 2>&1"; then
-      RES=$(docker exec "$CTR" sh -c "grep -E '^-10' $WD/eval.log" | head -1)
-      log "평가 결과: $RES"
-    else
-      log "!! 자동 평가 실패 - $WD/eval.log 확인"
-    fi
+    # 학습량 곡선까지 같이 뽑는다: epoch 4/7/최종 (RESULTS.md #10 과적합 판별)
+    # epoch_N.pth 는 IterSafeCheckpointHook 의 epoch 경계 저장이 만든다.
+    log "자동 평가 시작 (체크포인트별 10~25분)"
+    for CK in epoch_4.pth epoch_7.pth latest.pth; do
+      if ! docker exec "$CTR" test -f "$WD/$CK"; then log "  $CK 없음 - 건너뜀"; continue; fi
+      EVCMD="python tools/eval_protocol.py projects/configs/VAD/$NAME.py $WD/$CK --scenarios 0 --eval-stride 10 --offsets=-10,-5,0 --history-bev-only --fp16"
+      EVLOG="$WD/eval_${CK%.pth}.log"
+      if docker exec "$CTR" sh -c "$EVCMD > $EVLOG 2>&1"; then
+        RES=$(docker exec "$CTR" sh -c "grep -E '^-10' $EVLOG" | head -1)
+        log "평가 결과 [$CK]: $RES"
+      else
+        log "!! 자동 평가 실패 [$CK] - $EVLOG 확인"
+      fi
+    done
     # ABLATION=1 일 때만: 영상 기여도 검사 (보조 입력 모델용)
     if [ "${ABLATION:-0}" = "1" ]; then
       log "영상 ablation 시작 (약 30분)"

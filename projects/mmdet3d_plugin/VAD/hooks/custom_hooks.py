@@ -69,9 +69,10 @@ class IterSafeCheckpointHook(CheckpointHook):
         # epoch 경계 보존: 학습량 곡선(과적합 판별) 평가용 (RESULTS.md #10).
         # iter_*.pth 프루닝과 무관하게 남고, optimizer 를 빼 용량을 줄인다.
         # 재개는 계속 latest.pth(iter 파일)를 쓴다.
-        meta = dict(epoch=runner.epoch + 1, iter=runner.iter)
+        meta = dict()
         if runner.meta is not None:
             meta.update(runner.meta)
+        meta.update(epoch=runner.epoch + 1, iter=runner.iter)
         out_dir = self.out_dir or runner.work_dir
         filepath = osp.join(out_dir, 'epoch_{}.pth'.format(runner.epoch + 1))
         save_checkpoint(runner.model, filepath, optimizer=None, meta=meta)
@@ -81,9 +82,12 @@ class IterSafeCheckpointHook(CheckpointHook):
             # epoch 경계 저장은 mmcv 기본 동작이 이미 옳다
             return super()._save_checkpoint(runner)
 
-        meta = dict(epoch=runner.epoch, iter=runner.iter)
+        # 순서 중요: runner.meta 는 재개 시 과거 체크포인트의 epoch/iter 를
+        # 담고 있어, 나중에 update 하면 현재 값을 덮어쓴다 (2026-08-31 실측).
+        meta = dict()
         if runner.meta is not None:
             meta.update(runner.meta)
+        meta.update(epoch=runner.epoch, iter=runner.iter)
 
         out_dir = self.out_dir or runner.work_dir
         filename = 'iter_{}.pth'.format(runner.iter + 1)

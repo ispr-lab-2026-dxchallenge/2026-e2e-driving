@@ -460,6 +460,7 @@ WSL2 에서는 이때 WDDM 이 학습 컨텍스트를 밀어내면서 깔끔한 
 - [ ] clip 수가 **1,125개** 전부 들어 있는가
 - [ ] 각 clip 이 (6, 2) 형태인가
 - [ ] `__flops__` 키가 있는가
+- [ ] 목표점 조건 모델이면 ann-file 이 **`vad_etri_tgt_infos_temporal_test.pkl`(13차원)** 인가
 - [ ] 자차 상태·목표 지점을 입력에 넣었다면 **`ablate_image.py` 로 영상 기여도를 확인했는가**
       (악화 20% 미만이면 규정 §3 위반 소지. 제출 금지)
 - [ ] **팀에 알렸는가**
@@ -471,12 +472,15 @@ WSL2 에서는 이때 WDDM 이 학습 컨텍스트를 밀어내면서 깔끔한 
 ```bash
 # 1) FLOPs 기록
 python tools/measure_flops.py <config> \
-  --ann-file data/etri/vad_etri_pre_infos_temporal_test.pkl \
+  --ann-file data/etri/vad_etri_tgt_infos_temporal_test.pkl \
   --out submission.json
 
 # 2) 추론 (같은 파일에 병합된다. 순서 무관)
+#    !! 목표점 조건 모델(tgtbev 계열)은 반드시 tgt pkl (13차원, 목표점 포함).
+#    pre pkl(9차원)은 목표점이 없어 모델이 조용히 목표점 없이 돌아간다.
+#    스크립트가 이를 감지하면 중단하도록 가드를 넣어뒀다 (9/4).
 python tools/etri_test_submit.py <config> <checkpoint.pth> \
-  --ann-file data/etri/vad_etri_pre_infos_temporal_test.pkl \
+  --ann-file data/etri/vad_etri_tgt_infos_temporal_test.pkl \
   --out submission.json
 ```
 

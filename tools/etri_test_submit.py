@@ -108,6 +108,16 @@ def main():
     cfg.data.test.pop('map_ann_file', None)
 
     dataset = build_dataset(cfg.data.test)
+    # 목표점 조건 모델은 13차원 ego_lcf_feat(목표점 포함) pkl 이어야 한다.
+    # pre_infos_temporal_test.pkl(9차원)로 돌리면 헤드 가드가 조건을 조용히 꺼서
+    # 목표점 없는 모델로 제출되는 사고가 난다 (2026-09-04 사전 발견). tgt pkl 을 쓸 것.
+    _tr = cfg.model.get('pts_bbox_head', {}).get('transformer', {})
+    if _tr.get('use_target_cond', False):
+        import numpy as _np
+        _n = _np.asarray(dataset.data_infos[0].get('gt_ego_lcf_feat', [])).reshape(-1).shape[0]
+        if _n < 13:
+            raise SystemExit('[중단] 목표점 조건 모델인데 ann-file 의 gt_ego_lcf_feat 가 %d차원이다 (13 필요). '
+                             'data/etri/vad_etri_tgt_infos_temporal_test.pkl 을 쓸 것.' % _n)
     model = build_model(cfg.model, test_cfg=cfg.get('test_cfg'))
     load_checkpoint(model, args.checkpoint, map_location='cpu')
     model.compute_planner_metric_stp3 = lambda *a, **k: {}

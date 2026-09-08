@@ -191,6 +191,65 @@ ablation 을 통과해도 코드 심사에서 걸린다.
 - 금지 선례: planner 내부의 어떤 연산 자리(query/key/value/bias)에든 goal 을
   넣는 설계는 앞으로 검토 대상에서 제외한다.
 
+### 자차 상태를 영상에서 추론해 planner 에 입력 — 허용 (2026-09-08 확인, 타 팀 질의)
+
+> Q. ego history/status 를 데이터로 입력받지 않고 **네트워크가 영상으로부터
+> 직접 추론**해 planning 에 사용하는 것이 허용되는가?
+> A. "허용됩니다. Test 데이터로부터 ego history 및 status 를 입력받는 것이
+> 아니라, 네트워크가 영상으로부터 직접 추론한 결과를 planner 에 사용하는
+> 것은 **해당 값이 영상에서 파생된 정보**이므로 허용됩니다."
+
+우리에게 미치는 영향 (9/8 코드 추적 + 반대심문 검토 결과):
+- **현 제출 라인에는 영향 없음.** planner 는 자차 상태를 직접 받지 않고
+  (ego_query 는 학습 임베딩, `VAD_head.py:753` / 입력 구성 `:823-828`),
+  자차 상태는 베이스라인 기본값 그대로 can_bus(속도·가속도·요레이트 = pose
+  차분) → BEV query 가산(`VAD_transformer.py:283-286`, `use_can_bus=True`)
+  으로만 들어간다 — 8/25·8/27 허용 범주. 목표점 가산(`:287-296`)은 바로
+  그 옆줄에 같은 형태로 붙어 있다.
+- **"BEV 에서 자차 상태를 읽어 planner 에 넣는 head" 는 이 허용을 원용할 수
+  없다.** BEV 에는 can_bus 와 목표점이 이미 주입돼 있어 readout 은 영상
+  추론이 아니라 되읽기이고, 목표점이 BEV 를 거쳐 planner 수치 입력에 한
+  홉으로 닿아 9/2 불허 형태가 된다. 정직하게 원용하려면 `use_can_bus=False`
+  + 목표점 조건 off + pose 정렬(shift/rotate) 의존까지 실험으로 배제해야
+  하고, 그러면 목표점 이득(~0.3)을 포기한다 → 현 라인을 이길 가능성이
+  낮다. 마감(9/23)까지 본학습 재도전 여유도 없다. **채택하지 않는다.**
+- 방어 문서 표현 주의: "테스트 데이터로부터 자차 상태를 입력받지 않는다"
+  고 쓰면 거짓이다(can_bus 가 베이스라인 방식으로 들어간다). 정확한 표현은
+  "planner 는 자차 상태를 공통 BEV feature 를 통해서만 본다(베이스라인
+  동일)".
+
+### 9/2 판정에 비춘 트랙 T 재검토 (2026-09-08, 코드 추적 + 반대심문)
+
+목표점이 모델에 들어가는 자리는 `VAD_head.py:570-572` → `VAD_transformer.py:287-296`
+단 한 곳(BEV encoder 입력 가산)이고, planner 블록(`VAD_head.py:748-833`)에는
+목표점·ego_lcf_feat 참조가 없다. 9/2 답변의 기준은 "attention 이라는 연산"이
+아니라 "planner 모듈 안이냐"이며, 우리 자리는 운영국이 권장 문구로 적은
+"인식이나 공통 feature 향상 단계"다. 심사에서 뒤집힐 위험은 낮게 본다(반대
+심문 추정 15~25%, 아래 조치 후 10~15%). 남는 실질 위험은 심사위원이 8/28·9/2
+문구를 무시하고 "BEV 경유도 planner 경로"로 확장 해석하는 경우뿐이다.
+
+**제출 코드 정비 목록 (재학습 불필요, 수치 불변. 2차 심사 자료 만들 때 이행)**
+- `VAD_transformer.py:288` `kwargs.get('target_point')` → `kwargs.pop(...)`.
+  지금은 target_point 가 encoder/decoder/map_decoder 호출부(`:331,:435,:453`)
+  까지 kwargs 로 내려가(읽는 곳은 없음) grep 심사에서 오해를 산다
+- `exp_full_tgtbev.py` 에 `ego_his_encoder=None, ego_lcf_feat_idx=None` 을
+  값 변경 없이 명시 (부모 config 세 단계를 안 따라가도 보이게)
+- 코드 주석의 "운영국 허용" 류 자기변호 문구는 사실 서술로 바꾸고 근거는 문서로
+- 제출 후보 ckpt 의 ablation 을 **제출 프로토콜과 같은 조건**(eval_protocol
+  방식, history-bev-only, -10/-5/0)으로 재측정. 현 `ablate_image.py` 는 매
+  프레임 full forward 라 프로토콜이 다르고 13차원 가드도 없다 → 가드 추가
+- 폐기 config(`exp_target_0824`, `exp_target_vel_0824`, `exp_jeung_0818_egostate`)는
+  제출 코드 트리에서 archive/ 로 분리
+- 심사용 노트 `docs/JUDGE_NOTES.md`: 베이스라인 대비 diff(두 파일 ~25줄 +
+  config 3줄) 그대로, 정보 흐름 표(줄번호), can_bus 와의 병렬 비교, 운영국
+  발언 4건 원문(8/19, 8/25, 8/28, 9/2), ablation 표. "간접 전파는 사실"임을
+  숨기지 않는다
+- 단위 테스트 3종: target_point=None 이면 순수 비전 모델과 출력 동일 /
+  bev_embed 고정 시 목표점을 바꿔도 궤적 동일 / decoder·planner 모듈에
+  target_point 가 안 들어옴
+- 하지 말 것: 목표점 경로에 기능 추가, 운영국 재질의(질의 종료·"불확실했다"
+  는 기록만 남는다)
+
 자차 상태나 목표 지점을 입력에 추가한 모델은 **제출 전에 반드시 영상 기여도를 측정한다.**
 
 ```bash
@@ -449,7 +508,9 @@ WSL2 에서는 이때 WDDM 이 학습 컨텍스트를 밀어내면서 깔끔한 
   (5장의 git index 커밋 방식은 메인컴에서 부득이할 때만)
 - **서브컴 배포는 rsync**: 서브컴 git 은 초기 커밋에서 멈춰 있다(호스트키
   미등록 + 로컬 수정 산적, 8/30 확인). 메인컴에서
-  `rsync -a --exclude __pycache__ projects/ tools/ <서브컴>:...` 로 민다.
+  `rsync -a --exclude __pycache__ projects tools <서브컴>:~/ETRI_Challenge/ETRI_E2E_Driving_Challenge/`
+  로 민다. (`projects/ tools/` 처럼 뒤에 `/` 를 붙이면 디렉터리 내용물이 저장소
+  최상위로 풀려 나간다. 9/7 실측)
 
 ## 6. 제출 절차
 
@@ -484,6 +545,15 @@ python tools/etri_test_submit.py <config> <checkpoint.pth> \
   --out submission.json
 ```
 
+위 순서를 묶은 스크립트 (9/7, 컨테이너 밖 호스트 셸에서 실행):
+
+```bash
+# 체크포인트 풀 평가 -> L2_avg 오름차순 표 (work_dirs/<이름>/select_best.txt). 이미 된 epoch 은 건너뜀
+bash tools/select_best.sh <work_dir 이름>
+# ablation -> FLOPs -> 추론 -> 형식 검사. ablation 불합격·형식 불량이면 중단
+bash tools/make_submission.sh <work_dir 이름> epoch_N.pth
+```
+
 ### 파이프라인 리허설 실측 (2026-09-04, 서브컴 3060, 목표점 모델 체크포인트)
 
 | 단계 | 소요 | 결과 |
@@ -491,6 +561,7 @@ python tools/etri_test_submit.py <config> <checkpoint.pth> \
 | FLOPs 측정 | ~1분 | 458.97 G (cut-off 7,053 G 의 6.5%) |
 | 1,125 clip 추론 -> JSON | **9분** | 3프레임/clip, history-BEV+fp16 |
 | 형식 검사 | 즉시 | 1125 clip, 전부 (6,2), `__flops__` 포함 |
+| zip 포장 | 즉시 | 포털(dxchallenge.ai.kr)은 **zip, 100MB 이하**. zip 루트에 `submission.json` 한 파일만(폴더 없이). 9/8 확인 |
 
 즉 실제 제출 당일 GPU 작업은 체크포인트 선택 평가(10개 x ~8분) + ablation(30분)
 + 생성(10분) = **약 2시간**. 서브컴 한 대로 충분하다.

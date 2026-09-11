@@ -26,6 +26,8 @@ EXTRA=${2:-}
 # EPOCHS 를 지정하면 config 의 total_epochs 를 덮어쓴다. 미지정이면 config 값 사용.
 # (예전 기본값 10 이 스크리닝 config 의 4 를 조용히 덮어쓴 사고가 있었다)
 EPOCHS=${EPOCHS:-}
+# SEED 를 지정하면 train.py --seed 로 넘긴다 (미지정이면 train.py 기본값 0). 시드 실험용.
+SEED=${SEED:-}
 MAX_RETRY=${MAX_RETRY:-20}
 WD="work_dirs/$NAME"
 
@@ -37,7 +39,7 @@ WLOG="$WD/watch.log"
 
 log() { echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$HOME/ETRI_Challenge/$WLOG"; }
 
-log "감시 시작  config=$NAME  epochs=${EPOCHS:-config값}  extra='$EXTRA'"
+log "감시 시작  config=$NAME  epochs=${EPOCHS:-config값}  seed=${SEED:-기본0}  extra='$EXTRA'"
 
 for i in $(seq 1 "$MAX_RETRY"); do
   ITER=$(docker exec "$CTR" sh -c "grep -o 'Epoch \[[0-9]*\]\[[0-9]*/' $WD/train.log 2>/dev/null | tail -1" || true)
@@ -47,7 +49,7 @@ for i in $(seq 1 "$MAX_RETRY"); do
   if [ -n "$EPOCHS" ]; then EPOPT="runner.max_epochs=${EPOCHS:-config값} total_epochs=${EPOCHS:-config값}"; fi
   docker exec "$CTR" bash -c "python tools/train.py \
       projects/configs/VAD/$NAME.py \
-      --work-dir $WD --no-validate \
+      --work-dir $WD --no-validate ${SEED:+--seed $SEED} \
       --resume-from $WD/latest.pth \
       --cfg-options $EPOPT $EXTRA \
       >> $WD/train.log 2>&1"

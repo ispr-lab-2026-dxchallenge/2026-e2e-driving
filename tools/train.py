@@ -225,6 +225,19 @@ def main():
         test_cfg=cfg.get('test_cfg'))
     model.init_weights()
 
+    # 2단계 학습용 동결: cfg.train_only 에 적힌 접두를 포함하지 않는 파라미터는
+    # requires_grad=False (역전파 생략 -> 시간 단축, grad clip 노름에서도 제외).
+    # 예: train_only = ['pts_bbox_head.anchor']  (2026-09-10, 앵커 2단계)
+    train_only = cfg.get('train_only', None)
+    if train_only:
+        n_train, n_all = 0, 0
+        for _name, _p in model.named_parameters():
+            _keep = any(k in _name for k in train_only)
+            _p.requires_grad_(_keep)
+            n_all += _p.numel()
+            n_train += _p.numel() if _keep else 0
+        logger.info(f'train_only={train_only}: 학습 파라미터 {n_train / 1e6:.2f}M / 전체 {n_all / 1e6:.2f}M')
+
     logger.info(f'Model:\n{model}')
     datasets = [build_dataset(cfg.data.train)]
     if len(cfg.workflow) == 2:

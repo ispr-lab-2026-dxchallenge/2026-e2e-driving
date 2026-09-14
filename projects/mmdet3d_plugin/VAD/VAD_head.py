@@ -1,6 +1,7 @@
 import copy
 from math import pi, cos, sin
 
+import math
 import torch
 import numpy as np
 import torch.nn as nn
@@ -150,6 +151,10 @@ class VADHead(DETRHead):
                  anchor_reg_weight=1.0,
                  plan_reg_time_weight=None,
                  valid_fut_ts=6,
+                 use_vo_head=False,
+                 vo_drop=0.3,
+                 vo_loss_weight=1.0,
+                 vo_detach=True,
                  **kwargs):
 
         self.bev_h = bev_h
@@ -180,6 +185,12 @@ class VADHead(DETRHead):
         self.anchor_reg_weight = anchor_reg_weight
         self.plan_reg_time_weight = plan_reg_time_weight
         self.valid_fut_ts = valid_fut_ts
+        # VO 헤드 (2026-09-08 운영국: 영상으로부터 직접 추론한 ego status 의 planner 사용 허용)
+        self.use_vo_head = use_vo_head
+        self.vo_drop = vo_drop
+        self.vo_loss_weight = vo_loss_weight
+        self.vo_detach = vo_detach
+        self._vo_stash = None   # 추론 시 직전 프레임 영상 특징 (scene_token 과 함께)
 
         if loss_traj_cls['use_sigmoid'] == True:
             self.traj_num_cls = 1
@@ -456,6 +467,21 @@ class VADHead(DETRHead):
                 nn.ReLU(inplace=True),
                 Linear(self.embed_dims, self.fut_ts * 2))
 
+        if self.use_vo_head:
+            # 입력: 현재/직전 프레임 FPN 영상 특징(2C 채널)만. 출력 s_hat=[dx/5, dy/1, dyaw/0.2] (0.5s).
+            self.vo_conv = nn.Sequential(
+                nn.Conv2d(2 * self.embed_dims, 128, 1), nn.ReLU(inplace=True),
+                nn.Conv2d(128, 128, 3, stride=2, padding=1), nn.ReLU(inplace=True),
+                nn.Conv2d(128, 128, 3, stride=2, padding=1), nn.ReLU(inplace=True),
+                nn.AdaptiveAvgPool2d(1))
+            self.vo_fc = nn.Sequential(
+                Linear(128 * self.transformer.num_cams, self.embed_dims), nn.ReLU(inplace=True),
+                Linear(self.embed_dims, 3))
+            # planner 주입: zero-init 선형층을 ego_feats 에 가산 -> 학습 시작 시점의 궤적 출력은 기존 모델과 동일
+            self.vo_to_planner = Linear(3, ego_fut_dec_in_dim)
+            nn.init.zeros_(self.vo_to_planner.weight)
+            nn.init.zeros_(self.vo_to_planner.bias)
+
         self.agent_fus_mlp = nn.Sequential(
             nn.Linear(self.fut_mode*2*self.embed_dims, self.embed_dims, bias=True),
             nn.LayerNorm(self.embed_dims),
@@ -518,6 +544,8 @@ class VADHead(DETRHead):
                 only_bev=False,
                 ego_his_trajs=None,
                 ego_lcf_feat=None,
+                prev_img_feats=None,
+                vo_valid=None,
             ):
         """Forward function.
         Args:
@@ -553,6 +581,8 @@ class VADHead(DETRHead):
         bev_pos = self.positional_encoding(bev_mask).to(dtype)
             
         if only_bev:  # only use encoder to obtain BEV features, TODO: refine the workaround
+            if self.use_vo_head and not self.training:
+                self._vo_remember(mlvl_feats[0], img_metas)
             return self.transformer.get_bev_features(
                 mlvl_feats,
                 bev_queries,
@@ -827,6 +857,19 @@ class VADHead(DETRHead):
                 dim=-1
             )  # [B, 1, 2D]  
 
+        # VO 헤드: 영상 특징 두 프레임 -> 자차 운동 추정 -> planner 입력에 가산
+        vo_pred, vo_valid_t = None, None
+        if self.use_vo_head:
+            vo_pred, vo_valid_t = self._vo_forward(mlvl_feats[0], prev_img_feats, vo_valid, img_metas)
+            inj = vo_pred.detach() if self.vo_detach else vo_pred
+            if self.training and self.vo_drop > 0:
+                keep = (torch.rand(inj.shape[0], 1, device=inj.device) >= self.vo_drop).to(inj.dtype)
+                inj = inj * keep
+            inj = inj * vo_valid_t.reshape(-1, 1).to(inj.dtype)
+            ego_feats = ego_feats + self.vo_to_planner(inj).unsqueeze(1)
+            if not self.training:
+                self._vo_remember(mlvl_feats[0], img_metas)
+
         # Ego prediction
         outputs_ego_trajs = self.ego_fut_decoder(ego_feats)
         outputs_ego_trajs = outputs_ego_trajs.reshape(outputs_ego_trajs.shape[0], 
@@ -848,6 +891,9 @@ class VADHead(DETRHead):
             'map_enc_pts_preds': None,
             'ego_fut_preds': outputs_ego_trajs,
         }
+        if self.use_vo_head:
+            outs['ego_motion_pred'] = vo_pred
+            outs['vo_valid'] = vo_valid_t
 
         if self.use_anchor_head:
             # 트랙 V: 비전(scene) 특징만으로 앵커를 고르고 잔차를 보정한다
@@ -867,6 +913,50 @@ class VADHead(DETRHead):
                     -1, self.ego_fut_mode, self.fut_ts, 2)
 
         return outs
+
+    # ---- VO 헤드 ---------------------------------------------------------------------
+    # 2026-09-08 운영국: "네트워크가 영상으로부터 직접 추론한 ego status 를 planner 에 사용 -> 허용".
+    # 입력은 현재/직전 프레임의 FPN 영상 특징뿐이다. can_bus·ego_lcf_feat·ego_his_trajs 는 이
+    # 경로 어디에도 들어오지 않는다 (tests/test_vo_provenance.py 가 검증). 라벨은 loss_vo 에서만 쓴다.
+    def _vo_remember(self, cur_feats, img_metas):
+        """추론 시 다음 프레임을 위해 현재 프레임 영상 특징을 보관한다 (장면 토큰과 함께)."""
+        tok = img_metas[0].get('scene_token', None) if img_metas else None
+        self._vo_stash = (cur_feats.detach(), tok)
+
+    def _vo_forward(self, cur_feats, prev_img_feats, vo_valid, img_metas):
+        """cur_feats/prev_img_feats: (B, N, C, H, W). 반환 s_hat (B,3), valid (B,).
+        학습은 큐의 직전 프레임을 명시적으로 받고, 추론은 보관해 둔 직전 프레임 특징을 쓴다."""
+        B = cur_feats.shape[0]
+        if prev_img_feats is None and not self.training and self._vo_stash is not None:
+            feats, tok = self._vo_stash
+            cur_tok = img_metas[0].get('scene_token', None) if img_metas else None
+            if feats.shape == cur_feats.shape and tok == cur_tok:
+                prev_img_feats = feats
+        if prev_img_feats is None:
+            return cur_feats.new_zeros((B, 3)), cur_feats.new_zeros((B,))
+        x = torch.cat([cur_feats, prev_img_feats.to(cur_feats.dtype)], dim=2)   # (B, N, 2C, H, W)
+        N = x.shape[1]
+        x = self.vo_conv(x.flatten(0, 1))                                        # (B*N, 128, 1, 1)
+        x = x.reshape(B, N * x.shape[1])
+        s_hat = self.vo_fc(x)
+        if vo_valid is None:
+            valid = cur_feats.new_ones((B,))
+        else:
+            valid = vo_valid.to(cur_feats.dtype).reshape(B)
+        return s_hat, valid
+
+    def loss_vo(self, preds_dicts, ego_his_trajs, img_metas):
+        """라벨: 직전(-0.5s)->현재 변위(ego_his_trajs 마지막 원소, 현재 좌표계 m)와 yaw 변화
+        (img_metas can_bus[-1], 직전 큐 프레임 대비 deg). 학습 라벨에만 쓰이며 forward 에 들어가지 않는다."""
+        s_hat = preds_dicts['ego_motion_pred']
+        valid = preds_dicts['vo_valid']
+        B = s_hat.shape[0]
+        dxy = ego_his_trajs.reshape(B, -1, 2)[:, -1, :].to(s_hat.dtype)
+        dyaw = s_hat.new_tensor([float(m['can_bus'][-1]) for m in img_metas]) * (math.pi / 180.0)
+        target = torch.stack([dxy[:, 0] / 5.0, dxy[:, 1] / 1.0, dyaw / 0.2], dim=-1)
+        l1 = (s_hat - target).abs().sum(-1)
+        w = valid.to(s_hat.dtype)
+        return self.vo_loss_weight * (l1 * w).sum() / w.sum().clamp(min=1.0)
 
     def map_transform_box(self, pts, y_first=False):
         """
@@ -1603,7 +1693,8 @@ class VADHead(DETRHead):
              gt_attr_labels,
              gt_bboxes_ignore=None,
              map_gt_bboxes_ignore=None,
-             img_metas=None):
+             img_metas=None,
+             ego_his_trajs=None):
         """"Loss function.
         Args:
 
@@ -1746,6 +1837,8 @@ class VADHead(DETRHead):
                 ego_fut_gt, ego_fut_masks, ego_fut_cmd)
             loss_dict['loss_anchor_cls'] = loss_anchor_cls
             loss_dict['loss_anchor_reg'] = loss_anchor_reg
+        if self.use_vo_head and ego_his_trajs is not None and preds_dicts.get('ego_motion_pred') is not None:
+            loss_dict['loss_vo'] = self.loss_vo(preds_dicts, ego_his_trajs, img_metas)
 
         # loss from other decoder layers
         num_dec_layer = 0

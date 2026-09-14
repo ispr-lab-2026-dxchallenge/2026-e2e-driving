@@ -44,6 +44,7 @@ class VADCustomETRIDataset(VADCustomNuScenesDataset):
         crop_keep_top=('camera_front_left', 'camera_front_right',
                        'camera_rear_left', 'camera_rear_right'),
         sample_interval=5,
+        fix_prev_frame=False,
         map_pts_dim=2,
         *args,
         **kwargs
@@ -52,6 +53,8 @@ class VADCustomETRIDataset(VADCustomNuScenesDataset):
         self.crop_size = crop_size
         self.crop_keep_top = crop_keep_top
         self.sample_interval = sample_interval
+        # VO 헤드용: 직전 프레임(index - sample_interval)을 큐에 항상 포함 (2026-09-14)
+        self.fix_prev_frame = fix_prev_frame
         self.queue_length = queue_length
         self.overlap_test = overlap_test
         self.bev_size = bev_size
@@ -94,8 +97,15 @@ class VADCustomETRIDataset(VADCustomNuScenesDataset):
         prev_indexs_list = list(
             range(index - self.queue_length * self.sample_interval, index,
                   self.sample_interval))
-        random.shuffle(prev_indexs_list)
-        prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
+        if self.fix_prev_frame:
+            # 직전 프레임은 항상, 나머지는 무작위 (추론 오프셋 -10,-5,0 과 정합)
+            last = index - self.sample_interval
+            others = [i for i in prev_indexs_list if i != last]
+            random.shuffle(others)
+            prev_indexs_list = sorted([last] + others[:self.queue_length - 2], reverse=True)
+        else:
+            random.shuffle(prev_indexs_list)
+            prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
 
         input_dict = self.get_data_info(index)
         if input_dict is None:

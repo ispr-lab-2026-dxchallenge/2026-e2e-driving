@@ -12,6 +12,19 @@ from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.VAD.planner.metric_stp3 import PlanningMetric
 
 
+def _vo_gap_ok(prev_meta, cur_meta):
+    """VO 라벨 유효성: 두 큐 프레임이 같은 장면이고 프레임 번호 차가 정확히 5 인가.
+    sample_idx 형식은 '{scenario}_{frame:08d}' (etri_vad_converter.py). 해석 실패 시 유효로 둔다."""
+    try:
+        if prev_meta.get('scene_token') != cur_meta.get('scene_token'):
+            return 0.0
+        p = int(str(prev_meta['sample_idx']).rsplit('_', 1)[-1])
+        c = int(str(cur_meta['sample_idx']).rsplit('_', 1)[-1])
+        return 1.0 if c - p == 5 else 0.0
+    except Exception:
+        return 1.0
+
+
 @DETECTORS.register_module()
 class VAD(MVXTwoStageDetector):
     """VAD model.
@@ -137,7 +150,9 @@ class VAD(MVXTwoStageDetector):
                           ego_fut_masks=None,
                           ego_fut_cmd=None,
                           ego_lcf_feat=None,
-                          gt_attr_labels=None):
+                          gt_attr_labels=None,
+                          prev_img_feats=None,
+                          vo_valid=None):
         """Forward function'
         Args:
             pts_feats (list[torch.Tensor]): Features of point cloud branch
@@ -154,12 +169,15 @@ class VAD(MVXTwoStageDetector):
         """
 
         outs = self.pts_bbox_head(pts_feats, img_metas, prev_bev,
-                                  ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat)
+                                  ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat,
+                                  prev_img_feats=prev_img_feats, vo_valid=vo_valid)
         loss_inputs = [
             gt_bboxes_3d, gt_labels_3d, map_gt_bboxes_3d, map_gt_labels_3d,
             outs, ego_fut_trajs, ego_fut_masks, ego_fut_cmd, gt_attr_labels
         ]
-        losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
+        # ego_his_trajs 는 VO 헤드의 학습 라벨로만 쓰인다 (forward 에는 들어가지 않는다)
+        losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas,
+                                         ego_his_trajs=ego_his_trajs)
         return losses
 
     def forward_dummy(self, img):
@@ -197,8 +215,11 @@ class VAD(MVXTwoStageDetector):
                 img_feats = [each_scale[:, i] for each_scale in img_feats_list]
                 prev_bev = self.pts_bbox_head(
                     img_feats, img_metas, prev_bev, only_bev=True)
+            # VO 헤드용: 큐의 마지막 이력 프레임(현재 직전)의 영상 특징. 영상 유래 텐서이며
+            # can_bus·자차 상태는 어느 경로로도 섞이지 않는다 (extract_feat 는 img 만 소비).
+            prev_img_feats = img_feats_list[0][:, -1].detach()
             self.train()
-            return prev_bev
+            return prev_bev, prev_img_feats
 
     # @auto_fp16(apply_to=('img', 'points'))
     @force_fp32(apply_to=('img','points','prev_bev'))
@@ -255,7 +276,15 @@ class VAD(MVXTwoStageDetector):
         prev_img_metas = copy.deepcopy(img_metas)
         # prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
         # import pdb;pdb.set_trace()
-        prev_bev = self.obtain_history_bev(prev_img, prev_img_metas) if len_queue > 1 else None
+        prev_img_feats, vo_valid = None, None
+        if len_queue > 1:
+            prev_bev, prev_img_feats = self.obtain_history_bev(prev_img, prev_img_metas)
+            if getattr(self.pts_bbox_head, 'use_vo_head', False):
+                # VO 라벨 유효성: 직전 큐 프레임이 정확히 sample_interval(5) 프레임 전이고 같은 장면
+                vo_valid = img.new_tensor(
+                    [_vo_gap_ok(m[len_queue - 2], m[len_queue - 1]) for m in img_metas])
+        else:
+            prev_bev = None
 
         img_metas = [each[len_queue-1] for each in img_metas]
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
@@ -265,7 +294,8 @@ class VAD(MVXTwoStageDetector):
                                             gt_bboxes_ignore, map_gt_bboxes_ignore, prev_bev,
                                             ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
                                             ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
-                                            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
+                                            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels,
+                                            prev_img_feats=prev_img_feats, vo_valid=vo_valid)
 
         losses.update(losses_pts)
         return losses

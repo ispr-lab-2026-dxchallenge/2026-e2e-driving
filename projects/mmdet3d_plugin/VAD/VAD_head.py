@@ -150,6 +150,7 @@ class VADHead(DETRHead):
                  anchor_cls_weight=0.5,
                  anchor_reg_weight=1.0,
                  plan_reg_time_weight=None,
+                 plan_reg_cum_weight=None,
                  valid_fut_ts=6,
                  use_vo_head=False,
                  vo_drop=0.3,
@@ -184,6 +185,7 @@ class VADHead(DETRHead):
         self.anchor_cls_weight = anchor_cls_weight
         self.anchor_reg_weight = anchor_reg_weight
         self.plan_reg_time_weight = plan_reg_time_weight
+        self.plan_reg_cum_weight = plan_reg_cum_weight
         self.valid_fut_ts = valid_fut_ts
         # VO 헤드 (2026-09-08 운영국: 영상으로부터 직접 추론한 ego status 의 planner 사용 허용)
         self.use_vo_head = use_vo_head
@@ -1304,6 +1306,20 @@ class VADHead(DETRHead):
             ego_fut_gt,
             loss_plan_l1_weight
         )
+
+        # 누적 좌표(=채점 대상) 에 직접 거는 L1. 스텝 변위 L1 은 누적 드리프트를
+        # 그대로 벌하지 못한다. 가중치는 지표의 실효 가중치 [11,11,5,5,2,2]/36.
+        # 기본값 None 이면 아무 일도 하지 않는다 (기존 동작과 동일).
+        if self.plan_reg_cum_weight is not None:
+            cw = ego_fut_preds.new_tensor(self.plan_reg_cum_weight)
+            cw = cw * (cw.numel() / cw.sum())
+            cum_weight = ego_fut_cmd[..., None, None] * ego_fut_masks[:, None, :, None]
+            cum_weight = cum_weight.repeat(1, 1, 1, 2) * cw[None, None, :, None]
+            loss_plan_l1 = loss_plan_l1 + self.loss_plan_reg(
+                torch.cumsum(ego_fut_preds, dim=-2),
+                torch.cumsum(ego_fut_gt, dim=-2),
+                cum_weight
+            )
 
         loss_plan_bound = self.loss_plan_bound(
             ego_fut_preds[ego_fut_cmd==1],

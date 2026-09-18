@@ -13,7 +13,15 @@ _base_ = ['./VAD_etri_tiny_pre_split.py']
 
 model = dict(
     pts_bbox_head=dict(
+        # 아래 둘은 부모 config 의 기본값과 같다(값 변경 없음). 운영국 2026-08-27 답변이
+        # "베이스라인이 지원하지만 기본으로 쓰지 않는 구조"로 지목한 두 통로 —
+        # 자차 과거 궤적/상태를 planner 에 직접 넣는 경로 — 가 꺼져 있음을 여기서 바로 보이게
+        # 적어 둔다 (docs/JUDGE_NOTES.md 2장).
+        ego_his_encoder=None,
+        ego_lcf_feat_idx=None,
         transformer=dict(
+            # 5초 목표점을 BEV query 생성 단계에만 조건 입력으로 더한다(공통 feature 단계).
+            # planner 블록에는 목표점이 들어가지 않는다 — tests/test_target_point_flow.py
             use_target_cond=True,
             target_cond_drop=0.5,
         ),

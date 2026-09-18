@@ -285,7 +285,8 @@ class VADPerceptionTransformer(BaseModule):
         can_bus = self.can_bus_mlp(can_bus)[None, :, :]
         bev_queries = bev_queries + can_bus * self.use_can_bus
         if self.use_target_cond:
-            tp = kwargs.get('target_point', None)
+            # pop: 목표점은 여기(BEV query 가산)에서만 쓰고 encoder/decoder 로 넘기지 않는다.
+            tp = kwargs.pop('target_point', None)
             if tp is not None:
                 tp = bev_queries.new_tensor(tp).reshape(bs, 2)
                 t_emb = self.target_mlp(tp)[None, :, :]

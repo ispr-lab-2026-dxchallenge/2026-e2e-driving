@@ -95,6 +95,8 @@ def main():
         cfg.data.test.pop('map_ann_file', None)
         ds = build_dataset(cfg.data.test)
         load_checkpoint(model, a.checkpoint, map_location='cpu', strict=False)
+        # 충돌 지표 계산은 이 검사와 무관하고 CPU/GPU 텐서가 섞여 터진다(eval_protocol.py 도 동일 처리)
+        model.compute_planner_metric_stp3 = lambda *args, **kw: {}
         m = MMDataParallel(model.cuda(0).eval(), device_ids=[0])
 
         def run(idx, zero_tp):

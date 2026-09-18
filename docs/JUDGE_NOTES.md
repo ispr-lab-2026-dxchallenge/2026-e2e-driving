@@ -76,9 +76,18 @@ ego_agent_decoder → ego_map_decoder → ego_fut_decoder) 구간에서 `target_
 참고로 목표점을 쓰지 않는 순수 비전 모델의 같은 프로토콜 영상 0 배율이 2.05배이므로, 우리
 모델의 영상 의존도는 순수 비전 모델과 같은 수준이다.
 
-**단위 테스트** (`tests/`): ① `target_point=None` 이면 순수 비전 모델과 출력이 완전히 같다
-② BEV 를 고정하면 목표점을 바꿔도 궤적이 바뀌지 않는다 ③ planner·decoder 모듈에
-`target_point` 가 전달되지 않는다.
+**단위 테스트**: `python tests/test_target_point_flow.py` — 검사 14종 전부 PASS (2026-09-18).
+앞 12종은 **GPU·체크포인트 없이** config 와 소스만으로 돌아가므로 심사 환경에서 그대로 재현된다.
+
+| 검사 | 확인 내용 | 결과 |
+|---|---|---|
+| 1 | planner 블록(`VAD_head.py:785-876`)에 `target_point`/`ego_lcf_feat`/`ego_his_trajs` 참조 없음 | PASS |
+| 2a·2b | 금지 통로 `ego_his_encoder`·`ego_lcf_feat_idx` 가 `None` | PASS |
+| 2g | planner 첫 층 입력 = 512 = 2×embed_dims (자차 상태 추가 차원 없음) | PASS |
+| 2c·2h | 추론 config 가 VO 모듈을 만들지 않음 | PASS |
+| 3a | `VAD_transformer.py` 의 `target_point` 사용처가 1곳(`:289`)뿐 | PASS |
+| 4a | 같은 입력이면 같은 출력 (결정성) | PASS |
+| 4b | 목표점을 지우면 궤적이 달라진다 — 조건화가 실제로 작동 (최대 차이 0.84m) | PASS |
 
 ## 5. 숨기지 않는 사실 3가지
 
@@ -92,7 +101,9 @@ ego_agent_decoder → ego_map_decoder → ego_fut_decoder) 구간에서 `target_
    그 헤드는 현재/직전 프레임의 FPN **영상 특징만** 입력으로 받으며(can_bus·과거 궤적
    무접촉, 출처 테스트 4종 `tests/test_vo_provenance.py` 통과), 2026-09-08 답변이 허용한
    형태다. 다만 **추론 시에는 사용하지 않는다** — 제출 config(`exp_full_tgtbev.py`)는 VO
-   모듈을 아예 만들지 않고, 제출 체크포인트에서 `vo_*` 가중치는 제거했다. 학습 중 그 출력을
+   모듈을 아예 만들지 않고, 제출 체크포인트에서 `vo_*` 가중치는 제거했다(`tools/strip_ckpt.py`).
+   **제거 전후 검증 점수가 소수점 넷째 자리까지 완전히 같다**(0.144/0.278/0.461/**0.2941**) —
+   그 가중치가 추론에 전혀 쓰이지 않는다는 증거다. 학습 중 그 출력을
    확률적으로(p=0.3) 넣었다 뺐다 한 것이 정규화로 작용해 검증 L2 가 0.326 → 0.298 로
    좋아졌고, 그 효과만 남은 상태다(경위는 `docs/RESULTS.md` 10장).
 

@@ -10,7 +10,7 @@
 | `etri-vad-cu128.tar` | Docker 이미지 (CUDA 12.8, torch 2.7.1, mmdet3d/mmcv 1.4.0 + 플러그인 의존성) | 약 10GB |
 | 이 저장소 | 코드·config·문서·테스트 | 약 30MB |
 | `final_model.pth` | 제출 모델 가중치 (미사용 키 제거 완료) | 60MB |
-| `submission.json` | 제출한 예측 (1,125 clip × (6,2) + `__flops__`) | 12MB |
+| `submission.json` | 제출한 예측 (1,125 clip × (6,2) + `__flops__`) | 0.3MB |
 | `data/etri/` | 전처리된 주석 pkl + 이미지 (운영국 제공 데이터에서 `preprocess_etri.py` 로 생성) | — |
 
 `final_model.pth` 는 `tools/strip_ckpt.py` 로 추론에 쓰이지 않는 `vo_*` 가중치를 제거한 것이다.
@@ -33,10 +33,19 @@ docker exec etri python -c "import torch, mmcv, mmdet3d; print(torch.__version__
 ```bash
 docker exec etri python tests/test_target_point_flow.py
 docker exec etri python tests/test_plan_cum_loss.py
-docker exec etri python tests/test_vo_provenance.py projects/configs/VAD/exp_full_tgtbev_vo.py final_model.pth   # GPU 필요
 ```
 
-첫 번째가 이 제출의 핵심 주장(목표점이 planner 입력이 아니다)을 기계적으로 확인한다. 검사 14종.
+첫 번째가 이 제출의 핵심 주장(목표점이 planner 입력이 아니다)을 기계적으로 확인한다. 검사 14종
+(12종은 GPU 없이, 2종은 `--checkpoint final_model.pth` 를 주면 실행). 두 번째는 누적 좌표 손실의
+성질을 보이는 순수 단위 검사다.
+
+VO 헤드의 출처 검사(`tests/test_vo_provenance.py`)는 **제출 모델로는 돌지 않는다** — 제출 모델에는
+VO 모듈도 그 가중치도 없기 때문이다. 학습 단계에서 그 헤드가 영상 특징만 보았음을 확인하려면
+꼬리 학습용 config 와 제거 전 체크포인트가 필요하다:
+
+```bash
+docker exec etri python tests/test_vo_provenance.py   projects/configs/VAD/exp_full_tgtbev_vo.py <제거 전 꼬리 체크포인트>   # GPU 필요
+```
 
 ## 3. 검증 점수 재현 (3060 기준 9분)
 

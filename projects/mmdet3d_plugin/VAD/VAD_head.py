@@ -151,6 +151,8 @@ class VADHead(DETRHead):
                  anchor_reg_weight=1.0,
                  plan_reg_time_weight=None,
                  plan_reg_cum_weight=None,
+                 goal_anchor_ts=0,
+                 goal_anchor_weight=0.2,
                  valid_fut_ts=6,
                  use_vo_head=False,
                  vo_drop=0.3,
@@ -186,6 +188,9 @@ class VADHead(DETRHead):
         self.anchor_reg_weight = anchor_reg_weight
         self.plan_reg_time_weight = plan_reg_time_weight
         self.plan_reg_cum_weight = plan_reg_cum_weight
+        # 0 이면 기존 동작. T>fut_ts 면 꼬리가 T 스텝을 내고 앞 fut_ts 만 예측으로 쓴다(나머지는 학습 라벨용)
+        self.goal_anchor_ts = int(goal_anchor_ts)
+        self.goal_anchor_weight = goal_anchor_weight
         self.valid_fut_ts = valid_fut_ts
         # VO 헤드 (2026-09-08 운영국: 영상으로부터 직접 추론한 ego status 의 planner 사용 허용)
         self.use_vo_head = use_vo_head
@@ -444,7 +449,8 @@ class VADHead(DETRHead):
         for _ in range(self.num_reg_fcs):
             ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, ego_fut_dec_in_dim))
             ego_fut_decoder.append(nn.ReLU())
-        ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, self.ego_fut_mode*self.fut_ts*2))
+        _out_ts = self.goal_anchor_ts if self.goal_anchor_ts > self.fut_ts else self.fut_ts
+        ego_fut_decoder.append(Linear(ego_fut_dec_in_dim, self.ego_fut_mode*_out_ts*2))
         self.ego_fut_decoder = nn.Sequential(*ego_fut_decoder)
         if self.use_anchor_head:
             # 앵커는 tools/make_anchors.py 가 학습 split 궤적만으로 생성 (md5 확인)
@@ -874,8 +880,15 @@ class VADHead(DETRHead):
 
         # Ego prediction
         outputs_ego_trajs = self.ego_fut_decoder(ego_feats)
-        outputs_ego_trajs = outputs_ego_trajs.reshape(outputs_ego_trajs.shape[0], 
-                                                      self.ego_fut_mode, self.fut_ts, 2)
+        outputs_ego_trajs_ext = None
+        if self.goal_anchor_ts > self.fut_ts:
+            # (B, mode, T, 2): 앞 fut_ts 스텝이 예측(제출), 뒤는 5초 목표점 앵커 학습용
+            outputs_ego_trajs_ext = outputs_ego_trajs.reshape(
+                outputs_ego_trajs.shape[0], self.ego_fut_mode, self.goal_anchor_ts, 2)
+            outputs_ego_trajs = outputs_ego_trajs_ext[:, :, :self.fut_ts, :]
+        else:
+            outputs_ego_trajs = outputs_ego_trajs.reshape(outputs_ego_trajs.shape[0], 
+                                                          self.ego_fut_mode, self.fut_ts, 2)
 
         outs = {
             'bev_embed': bev_embed,
@@ -893,6 +906,8 @@ class VADHead(DETRHead):
             'map_enc_pts_preds': None,
             'ego_fut_preds': outputs_ego_trajs,
         }
+        if outputs_ego_trajs_ext is not None:
+            outs['ego_fut_preds_ext'] = outputs_ego_trajs_ext
         if self.use_vo_head:
             outs['ego_motion_pred'] = vo_pred
             outs['vo_valid'] = vo_valid_t
@@ -1358,6 +1373,35 @@ class VADHead(DETRHead):
 
         return loss_plan_dict
     
+    def loss_goal_anchor(self, ext_preds, ego_fut_gt, ego_fut_masks, ego_fut_cmd, ego_lcf_feat):
+        """5초 목표점 앵커: 꼬리가 낸 T(=goal_anchor_ts) 스텝 중 fut_ts 이후 스텝을 학습 라벨로 묶는다.
+
+        라벨의 출처는 데이터에 있는 5초 뒤 실제 위치(ego_lcf_feat[9:11], 현재 자차 좌표계 m)다.
+        학습 시 손실에만 쓰이고 모델 입력으로는 들어가지 않는다(입력 경로는 BEV 조건화 그대로).
+        * 스텝 fut_ts+1..T 의 변위 라벨 = (목표점 - 3초 GT 위치) / (T - fut_ts)   (등속 보간, 약한 라벨)
+        * T 스텝 누적 위치 = 목표점                                                  (정확한 라벨)
+        목적: 목표점이 뜻하는 '앞으로 5초간의 평균 속력'과 3초 궤적의 눈금(진행거리)을 한 사슬로 묶어
+        종방향 드리프트(9/18 해부: 오차의 93%)를 줄인다. command 로 선택된 모드에만 건다.
+        """
+        B, M, T, _ = ext_preds.shape
+        F = self.fut_ts
+        if ego_lcf_feat is None or ego_lcf_feat.reshape(B, -1).shape[1] < 11:
+            # 목표점이 없는 주석(9차원 lcf)이면 앵커를 걸 수 없다 — 0 손실 (기울기 경로만 유지)
+            return ext_preds.sum() * 0.0
+        goal = ego_lcf_feat.reshape(B, -1)[:, 9:11].to(ext_preds.dtype)            # (B,2) m
+        gt_cum3 = torch.cumsum(ego_fut_gt.to(ext_preds.dtype), dim=-2)[:, -1, :]    # (B,2) 3초 GT 위치
+        valid = ((ego_fut_masks.min(dim=1).values > 0.5) & torch.isfinite(goal).all(dim=1)
+                 & (goal.norm(dim=1) < 200.0))
+        w_mode = (ego_fut_cmd > 0.5).to(ext_preds.dtype)                             # (B,M)
+        w = w_mode * valid.to(ext_preds.dtype)[:, None]                               # (B,M)
+        n = w.sum().clamp(min=1.0)
+        step_tgt = ((goal - gt_cum3) / float(T - F))[:, None, None, :].expand(B, M, T - F, 2)
+        l_step = (ext_preds[:, :, F:, :] - step_tgt).abs().mean(dim=(2, 3))             # (B,M)
+        end = torch.cumsum(ext_preds, dim=-2)[:, :, -1, :]                              # (B,M,2)
+        l_end = (end - goal[:, None, :]).abs().mean(dim=2) / float(T)                   # (B,M)
+        loss = ((l_step + l_end) * w).sum() / n * self.goal_anchor_weight
+        return torch.nan_to_num(loss)
+
     def loss_anchor(self, cls_scores, ego_feats, ego_fut_gt,
                     ego_fut_masks, ego_fut_cmd):
         """트랙 V 손실: 최근접 앵커 분류(CE) + 할당 앵커 기준 잔차 회귀(L1).
@@ -1710,7 +1754,8 @@ class VADHead(DETRHead):
              gt_bboxes_ignore=None,
              map_gt_bboxes_ignore=None,
              img_metas=None,
-             ego_his_trajs=None):
+             ego_his_trajs=None,
+             ego_lcf_feat=None):
         """"Loss function.
         Args:
 
@@ -1847,6 +1892,10 @@ class VADHead(DETRHead):
         loss_dict['loss_plan_bound'] = loss_planning_dict['loss_plan_bound']
         loss_dict['loss_plan_col'] = loss_planning_dict['loss_plan_col']
         loss_dict['loss_plan_dir'] = loss_planning_dict['loss_plan_dir']
+        if (self.goal_anchor_ts > self.fut_ts and preds_dicts.get('ego_fut_preds_ext') is not None
+                and ego_lcf_feat is not None):
+            loss_dict['loss_goal_anchor'] = self.loss_goal_anchor(
+                preds_dicts['ego_fut_preds_ext'], ego_fut_gt, ego_fut_masks, ego_fut_cmd, ego_lcf_feat)
         if self.use_anchor_head:
             loss_anchor_cls, loss_anchor_reg = self.loss_anchor(
                 preds_dicts['anchor_cls_scores'], preds_dicts['ego_plan_feats'],

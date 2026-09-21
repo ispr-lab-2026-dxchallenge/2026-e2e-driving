@@ -176,8 +176,9 @@ class VAD(MVXTwoStageDetector):
             outs, ego_fut_trajs, ego_fut_masks, ego_fut_cmd, gt_attr_labels
         ]
         # ego_his_trajs 는 VO 헤드의 학습 라벨로만 쓰인다 (forward 에는 들어가지 않는다)
+        # ego_lcf_feat 는 5초 목표점 앵커 손실의 라벨(ego_lcf_feat[9:11])로만 쓰인다
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas,
-                                         ego_his_trajs=ego_his_trajs)
+                                         ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat)
         return losses
 
     def forward_dummy(self, img):

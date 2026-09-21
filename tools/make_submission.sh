@@ -11,6 +11,9 @@ CTR=${ETRI_CONTAINER:-etri}
 NAME=${1:?"work_dirs 아래 디렉터리 이름을 넣어라"}
 CK=${2:?"체크포인트 파일명을 넣어라 (예: epoch_9.pth)"}
 CFG=${3:-exp_full_tgtbev}
+# 추론 옵션 추가 (예: SUBMIT_EXTRA="--offsets=-15,-5,0"). 오프셋은 -30~0 사이 5의 배수, 마지막은 0.
+# 운영국 2026-08-24: 과거 3s 안에서 프레임 수·간격 자유. 바꾸면 반드시 eval_protocol 로 같은 오프셋 검증치를 먼저 확인할 것.
+SUBMIT_EXTRA=${SUBMIT_EXTRA:-}
 WD="work_dirs/$NAME"
 HWD="$HOME/ETRI_Challenge/$WD"
 CFGP="projects/configs/VAD/$CFG.py"
@@ -24,7 +27,7 @@ log() { echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 run() { docker exec "$CTR" sh -c "$1"; }
 
 [ -f "$HWD/$CK" ] || { log "!! $HWD/$CK 없음"; exit 1; }
-log "제출 생성 시작  dir=$NAME  ckpt=$CK  config=$CFG"
+log "제출 생성 시작  dir=$NAME  ckpt=$CK  config=$CFG  extra=[$SUBMIT_EXTRA]"
 
 log "1/4 영상 ablation (약 30분)"
 run "python tools/ablate_image.py $CFGP $WD/$CK --scenarios 10 > $WD/ablation_${TAG}.log 2>&1" \
@@ -40,7 +43,7 @@ run "python tools/measure_flops.py $CFGP --ann-file $ANN --out $OUT > $WD/flops_
 grep -E 'FLOPs \(|wrote' "$HWD/flops_${TAG}.log" | tee -a "$LOG"
 
 log "3/4 테스트 1,125 clip 추론 (약 10분)"
-run "python tools/etri_test_submit.py $CFGP $WD/$CK --ann-file $ANN --out $OUT > $WD/submit_${TAG}.log 2>&1" \
+run "python tools/etri_test_submit.py $CFGP $WD/$CK --ann-file $ANN --out $OUT $SUBMIT_EXTRA > $WD/submit_${TAG}.log 2>&1" \
   || { log "!! 추론 실패 - $HWD/submit_${TAG}.log 확인"; tail -3 "$HWD/submit_${TAG}.log"; exit 1; }
 tail -1 "$HWD/submit_${TAG}.log" | tee -a "$LOG"
 

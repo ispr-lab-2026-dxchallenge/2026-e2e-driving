@@ -9,7 +9,8 @@ code = 'import torch\n' + '\n'.join(l[4:] for l in src[beg:end].splitlines())
 ns = {}
 exec(code, ns)
 fn = ns['loss_goal_anchor']
-self = types.SimpleNamespace(fut_ts=6, goal_anchor_weight=1.0)
+self = types.SimpleNamespace(fut_ts=6, goal_anchor_weight=1.0,
+                             transformer=types.SimpleNamespace(last_goal_dropped=False))
 
 B, M, T = 4, 3, 10
 gt = torch.randn(B, 6, 2) * 0.5 + torch.tensor([5.0, 0.0])          # 3초 GT 변위
@@ -37,9 +38,13 @@ l4 = fn(self, e4, gt, masks, cmd, lcf); assert l4.item() > 0
 # 무효 표본(마스크 0)은 기여 없음
 m5 = masks.clone(); m5[:, -1] = 0
 l5 = fn(self, e2, gt, m5, cmd, lcf); assert l5.item() < 1e-6
+# condition dropout 으로 목표점이 지워진 배치는 앵커를 걸지 않는다
+self.transformer.last_goal_dropped = True
+l6 = fn(self, e2, gt, masks, cmd, lcf); assert l6.item() == 0.0
+self.transformer.last_goal_dropped = False
 # 기울기가 앞 6 스텝까지 흐른다
 e7 = e4.clone().requires_grad_(True)
 fn(self, e7, gt, masks, cmd, lcf).backward()
 assert e7.grad[:, 2, :6].abs().sum() > 0
-print('단위 검사 PASS  (완벽 %.2e / 뒤스텝 교란 %.3f / 비선택모드 %.2e / 드리프트 %.3f / 마스크 %.2e)'
-      % (l0, l2, l3, l4, l5))
+print('단위 검사 PASS  (완벽 %.2e / 뒤스텝 교란 %.3f / 비선택모드 %.2e / 드리프트 %.3f / 마스크 %.2e / 드롭배치 %.1f)'
+      % (l0, l2, l3, l4, l5, l6))

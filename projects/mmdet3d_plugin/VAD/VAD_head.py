@@ -1388,6 +1388,10 @@ class VADHead(DETRHead):
         if ego_lcf_feat is None or ego_lcf_feat.reshape(B, -1).shape[1] < 11:
             # 목표점이 없는 주석(9차원 lcf)이면 앵커를 걸 수 없다 — 0 손실 (기울기 경로만 유지)
             return ext_preds.sum() * 0.0
+        if getattr(getattr(self, 'transformer', None), 'last_goal_dropped', False):
+            # 이번 배치는 condition dropout 으로 목표점이 BEV 에 안 들어갔다 — 앵커를 걸면 모델이
+            # 알 수 없는 값을 맞추라는 압력이 되므로 건너뛴다
+            return ext_preds.sum() * 0.0
         goal = ego_lcf_feat.reshape(B, -1)[:, 9:11].to(ext_preds.dtype)            # (B,2) m
         gt_cum3 = torch.cumsum(ego_fut_gt.to(ext_preds.dtype), dim=-2)[:, -1, :]    # (B,2) 3초 GT 위치
         valid = ((ego_fut_masks.min(dim=1).values > 0.5) & torch.isfinite(goal).all(dim=1)

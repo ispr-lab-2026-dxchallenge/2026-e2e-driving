@@ -292,8 +292,11 @@ class VADPerceptionTransformer(BaseModule):
                 t_emb = self.target_mlp(tp)[None, :, :]
                 # condition dropout: 학습 중 확률적으로 목표점을 지워
                 # 목표점만으로 수렴하는 지름길 학습을 차단한다
+                # (이번 forward 에서 지웠는지를 남긴다 — 5초 앵커 손실이 그 배치를 건너뛰는 데 쓴다)
+                self.last_goal_dropped = False
                 if self.training and float(torch.rand(1)) < self.target_cond_drop:
                     t_emb = t_emb * 0.0
+                    self.last_goal_dropped = True
                 bev_queries = bev_queries + t_emb
 
         feat_flatten = []
